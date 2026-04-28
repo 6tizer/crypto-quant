@@ -25,6 +25,42 @@ class Settings(BaseSettings):
     # 标的范围
     top_symbols_count: int = 50
 
+    # === 交易参数（阶段 3 使用，提前定义） ===
+    stop_loss_amount: float = 200.0           # 固定止损金额 (u)
+    leverage_strategy_a: int = 5              # 策略 A 杠杆
+    leverage_strategy_b: int = 3              # 策略 B 杠杆
+    initial_capital: float = 100.0            # 初始资金 (u)
+    entry_threshold: float = 0.65             # 入场阈值
+
+    # === 风控参数 ===
+    max_consecutive_stops: int = 3            # 连续止损暂停阈值
+    daily_loss_limit: float = 500.0           # 单日亏损上限 (u)
+    max_drawdown_pct: float = 30.0            # 总回撤暂停线 %
+    fear_greed_pause_line: int = 15           # 恐贪暂停线
+
+    # === 信号参数 ===
+    momentum_threshold: float = 2.5           # 涨幅异动倍数 (N 倍 20 日标准差)
+    oi_change_threshold: float = 15.0         # OI 48h 变动阈值 %
+    oi_price_divergence_threshold: float = 3.0  # OI 背离价格变动阈值 %
+    whitelist_listed_days: int = 180          # 新币白名单天数
+    whitelist_max_daily_move: float = 30.0    # 历史大波动阈值 %
+    strategy_switch_threshold: float = 1.5    # 策略切换阈值
+
+    # === 信号权重（策略 A） ===
+    weight_a_momentum: float = 0.35
+    weight_a_square_heat: float = 0.25        # 阶段 5 才有数据
+    weight_a_oi_divergence: float = 0.20
+    weight_a_whitelist: float = 0.10
+    weight_a_kronos: float = 0.10             # 阶段 5 后补
+
+    # === 信号权重（策略 B） ===
+    weight_b_kronos: float = 0.25
+    weight_b_mvrv: float = 0.20
+    weight_b_sopr: float = 0.15
+    weight_b_etf: float = 0.15
+    weight_b_smart_money: float = 0.15
+    weight_b_fear_greed: float = 0.10
+
     @property
     def proxy_url(self) -> str:
         return f"http://{self.binance_proxy_host}:{self.binance_proxy_port}"

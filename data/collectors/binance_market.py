@@ -56,7 +56,35 @@ def fetch_and_store() -> int:
         top_symbols = [sym for sym, _, _ in top]
         log.info("top_symbols_selected", count=len(top_symbols))
 
-        # 3. 拉最近 20 天 K 线（用于算波动率）
+        # 3. 批量拉 OI 数据（先拉，后面要用）
+        oi_map: dict[str, float] = {}
+        for sym in top_symbols:
+            try:
+                oi_data = exchange.fetch_open_interest(sym)
+                oi_map[sym] = float(oi_data.get("openInterestAmount", 0) or 0)
+            except Exception:
+                oi_map[sym] = 0.0
+        log.info("oi_fetched", count=len(oi_map))
+
+        # 4. 查 48h 前的 OI 用于算变化率
+        now = datetime.now(timezone.utc)
+        two_days_ago = now - timedelta(hours=48)
+        prev_oi_map: dict[str, float] = {}
+        for sym in top_symbols:
+            base_sym = sym.replace("/USDT:USDT", "/USDT")
+            row = (
+                session.query(MarketSnapshot)
+                .filter(
+                    MarketSnapshot.symbol == base_sym,
+                    MarketSnapshot.captured_at <= two_days_ago,
+                )
+                .order_by(desc(MarketSnapshot.captured_at))
+                .first()
+            )
+            if row and row.oi and row.oi > 0:
+                prev_oi_map[sym] = row.oi
+
+        # 5. 拉最近 20 天 K 线（算波动率 + listed_days）
         ohlcv_cache: dict[str, list] = {}
         for sym in top_symbols:
             try:
@@ -66,11 +94,21 @@ def fetch_and_store() -> int:
                 log.warning("ohlcv_fetch_failed", symbol=sym, error=str(e))
                 ohlcv_cache[sym] = []
 
-        # 4. 写入数据库
-        now = datetime.now(timezone.utc)
+        # 6. 尝试获取上线天数（从 market info 的 listingDate）
+        listed_days_map: dict[str, int] = {}
+        try:
+            onboard_date_map = _fetch_listing_dates(exchange, top_symbols)
+            for sym, ts in onboard_date_map.items():
+                if ts > 0:
+                    listed_days_map[sym] = max(1, (now.timestamp() * 1000 - ts) / 86400000)
+        except Exception as e:
+            log.warning("listing_date_fetch_failed", error=str(e))
+
+        # 7. 写入数据库
         for sym, ticker, vol in top:
             change_pct = ticker.get("percentage", 0) or 0
             price = ticker.get("last", 0) or 0
+            base_sym = sym.replace("/USDT:USDT", "/USDT")
 
             # 算 20 日波动率
             daily_returns = []
@@ -86,30 +124,38 @@ def fetch_and_store() -> int:
             # 算历史最大单日波动
             max_move = 0
             for candle in ohlcv:
-                if candle[1] > 0:  # open > 0
+                if candle[1] > 0:
                     move = abs(candle[4] - candle[1]) / candle[1] * 100
                     max_move = max(max_move, move)
 
+            # 算 OI 48h 变化率
+            current_oi = oi_map.get(sym, 0)
+            oi_change = 0.0
+            prev_oi = prev_oi_map.get(sym)
+            if prev_oi and prev_oi > 0 and current_oi > 0:
+                oi_change = (current_oi - prev_oi) / prev_oi * 100
+
+            # 上线天数
+            listed = listed_days_map.get(sym, 0)
+
             snapshot = MarketSnapshot(
-                symbol=sym.replace("/USDT:USDT", "/USDT"),
+                symbol=base_sym,
                 price=price,
                 volume_24h=vol,
                 price_change_pct=change_pct,
                 volatility_20d=vol_20d,
-                oi=0,  # OI 需要单独接口，暂时留 0
-                oi_change_48h_pct=0,
+                oi=current_oi,
+                oi_change_48h_pct=oi_change,
+                listed_days=int(listed),
                 max_daily_move_pct=max_move,
                 funding_rate=ticker.get("fundingRate", 0) or 0,
                 captured_at=now,
             )
-            session.merge(snapshot)
+            session.add(snapshot)
             count += 1
 
         session.commit()
         log.info("market_data_saved", count=count)
-
-        # 5. 尝试拉 OI 数据（币安 fapi 公共接口）
-        _fetch_oi(exchange, session, top_symbols)
 
     except Exception as e:
         session.rollback()
@@ -121,36 +167,25 @@ def fetch_and_store() -> int:
     return count
 
 
-def _fetch_oi(exchange: ccxt.binanceusdm, session, symbols: list[str]) -> None:
-    """拉取 OI 数据并更新 market_snapshots"""
-    count = 0
-    now = datetime.now(timezone.utc)
-
-    for sym in symbols:
-        try:
-            # ccxt 统一接口
-            oi_data = exchange.fetch_open_interest(sym)
-            if oi_data and oi_data.get("openInterestAmount"):
-                base_sym = sym.replace("/USDT:USDT", "/USDT")
-                # 找最新一条记录更新 OI
-                latest = (
-                    session.query(MarketSnapshot)
-                    .filter(MarketSnapshot.symbol == base_sym)
-                    .order_by(desc(MarketSnapshot.captured_at))
-                    .first()
-                )
-                if latest:
-                    latest.oi = oi_data["openInterestAmount"]
-                    count += 1
-        except Exception:
-            pass  # OI 接口不是所有币都有，静默跳过
-
-    if count > 0:
-        session.commit()
-        log.info("oi_data_updated", count=count)
+def _fetch_listing_dates(exchange: ccxt.binanceusdm, symbols: list[str]) -> dict[str, int]:
+    """从币安 fapi 获取合约上线时间戳（毫秒）"""
+    result = {}
+    try:
+        resp = exchange.fapiPublicGetExchangeInfo()
+        symbols_info = {s["symbol"]: s for s in resp.get("symbols", [])}
+        for sym in symbols:
+            # ccxt symbol "BTC/USDT:USDT" → binance "BTCUSDT"
+            base = sym.split("/")[0]
+            binance_sym = base + "USDT"
+            info = symbols_info.get(binance_sym, {})
+            onboard_ts = info.get("onboardDate", 0)
+            if onboard_ts:
+                result[sym] = int(onboard_ts)
+    except Exception:
+        pass
+    return result
 
 
 if __name__ == "__main__":
-    # 单独测试
     n = fetch_and_store()
     print(f"Done: {n} records saved")
