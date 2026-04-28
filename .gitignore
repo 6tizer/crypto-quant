@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.egg
+
+# Data & Secrets
+data/*.db
+data/*.db-journal
+.env
+config/.env
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+.handoffs/
+HANDOFF.md
