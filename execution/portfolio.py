@@ -1,9 +1,6 @@
 """仓位管理 — 资金分配 + 仓位计算 + 保证金管理
 
 P1-⑤: ATR止损 + risk-based仓位（与回测v5一致）
-- 止损距离 = 2 × ATR(14)
-- 仓位 = equity × risk_per_trade × entry_price / (stop_distance × leverage)
-- 删除固定20%分配 + get_stop_loss_amount 逻辑
 """
 
 from dataclasses import dataclass
@@ -18,34 +15,39 @@ log = structlog.get_logger()
 
 @dataclass
 class PositionSizeResult:
-    """仓位计算结果"""
     quantity: float
     margin: float
     position_value: float
     leverage: int
     risk_amount: float
     stop_loss_price: float
-    stop_loss_distance: float  # P1-⑤: 止损价格距离 (price units)
+    stop_loss_distance: float
+
+
+def _build_exchange(api_key: str = "", secret: str = "") -> ccxt.binanceusdm:
+    """构建交易所实例。"""
+    params = {
+        "enableRateLimit": True,
+        "proxies": settings.proxies,
+        "options": {"defaultType": "future"},
+        "timeout": 30000,
+    }
+    if api_key:
+        params["apiKey"] = api_key
+    if secret:
+        params["secret"] = secret
+    return ccxt.binanceusdm(params)
 
 
 def get_exchange() -> ccxt.binanceusdm:
-    return ccxt.binanceusdm({
-        "enableRateLimit": True,
-        "proxies": settings.proxies,
-        "options": {"defaultType": "future"},
-        "timeout": 30000,
-    })
+    return _build_exchange()
 
 
 def get_trading_exchange() -> ccxt.binanceusdm:
-    return ccxt.binanceusdm({
-        "enableRateLimit": True,
-        "apiKey": settings.binance_api_key,
-        "secret": settings.binance_api_secret,
-        "proxies": settings.proxies,
-        "options": {"defaultType": "future"},
-        "timeout": 30000,
-    })
+    return _build_exchange(
+        api_key=settings.binance_api_key,
+        secret=settings.binance_api_secret,
+    )
 
 
 def get_account_balance(exchange: ccxt.binanceusdm) -> float:
@@ -58,10 +60,9 @@ def get_account_balance(exchange: ccxt.binanceusdm) -> float:
 
 
 def get_stop_loss_amount(equity: float) -> float:
-    """单笔止损金额（保留供风控模块使用，不再用于仓位计算）。
+    """单笔止损金额（保留供风控引用）。
 
-    早期（净值 <= 1000u）：账户净值 × 20%
-    后期（净值 > 1000u）：固定 200u
+    早期: equity × 20%  |  后期: 固定 200u
     """
     if equity > settings.risk_mode_threshold:
         return settings.stop_loss_amount
@@ -74,44 +75,27 @@ def calculate_position_size(
     equity: float,
     entry_price: float,
     strategy_type: str = "A",
-    atr: float = 0.0,  # P1-⑤: 新增 ATR 参数
+    atr: float = 0.0,
 ) -> PositionSizeResult | None:
-    """计算某标的的开仓参数（P1-⑤: ATR止损 + risk-based仓位）。
-
-    Args:
-        exchange: ccxt 交易所实例
-        symbol: 交易对
-        equity: 当前账户权益
-        entry_price: 入场价格
-        strategy_type: 策略类型 A/B
-        atr: ATR(14) 值 — 用于计算止损距离
-
-    Returns:
-        PositionSizeResult 或 None
-    """
+    """计算开仓参数 — ATR止损 + risk-based仓位。"""
     if equity <= 0 or entry_price <= 0 or atr <= 0:
         raise ValueError(f"无效参数: equity={equity}, entry_price={entry_price}, atr={atr}")
 
-    # 1. 选择杠杆
     leverage = (
         settings.leverage_strategy_a
         if strategy_type.upper() == "A"
         else settings.leverage_strategy_b
     )
 
-    # 2. P1-⑤: ATR止损距离 + risk-based仓位
     stop_loss_distance = 2 * atr
     stop_loss_price = entry_price - stop_loss_distance
 
-    # 仓位公式（与回测v5一致）：
     # size_pct = risk_per_trade × entry_price / (stop_distance × leverage)
-    # position_value = equity × size_pct
     size_pct = settings.risk_per_trade * entry_price / (stop_loss_distance * leverage)
-    size_pct = min(size_pct, 1.0)  # 不超过100%
+    size_pct = min(size_pct, 1.0)
     position_value = equity * size_pct
-    risk_amount = position_value * (stop_loss_distance / entry_price) * leverage  # PnL@stop
+    risk_amount = position_value * (stop_loss_distance / entry_price) * leverage
 
-    # 3. 计算数量
     quantity = position_value / entry_price
     try:
         market = exchange.market(symbol)
@@ -127,7 +111,6 @@ def calculate_position_size(
         if quantity <= 0:
             return None
 
-    # 4. 计算保证金
     actual_position_value = quantity * entry_price
     margin = actual_position_value / leverage
 
@@ -144,9 +127,8 @@ def calculate_position_size(
 
 def get_open_position_count(exchange: ccxt.binanceusdm) -> int:
     try:
-        positions = exchange.fetch_positions()
         return sum(
-            1 for pos in positions
+            1 for pos in exchange.fetch_positions()
             if float(pos.get("contracts", 0) or 0) > 0
             and str(pos.get("side", "")).upper() == "LONG"
         )
