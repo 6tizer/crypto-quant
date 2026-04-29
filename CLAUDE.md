@@ -140,13 +140,25 @@ crypto-quant/
 - README 和文档与实际阶段同步
 
 ## 已知问题（待修复）
-1. 🔴 `poll_positions` 符号不匹配 — 查询前需 `to_db_symbol()` 转换（已定位，待修）
-2. 🔴 止损单失败不阻止开仓 → 裸仓风险（待修）
-3. 🟡 `check_risk_status` 缺少 `exchange` 参数，每次新建实例（待修）
-4. 🟡 Demo 余额忽略未实现盈亏（待修）
-5. 🟡 非合约过滤只在 `main.py` 不在 `order_manager` 内部（待修）
-6. 🔵 整个仓库 0 个测试（待建）
-7. 🔵 无 mypy 配置（待加）
+1. 🔵 整个仓库 0 个测试（待建，demo 跑稳后专项）
+2. 🔵 mypy 扫描有 89 个 warning（大部分是 SQLAlchemy ORM Column 类型误报，待逐步消除）
+
+## 已修复（2026-04-30 审计）
+> 详见 `iCloud/Hermes/crypto-quant-audit-2026-04-30.md`
+
+**Round 1 — commit `cfa0a31`（P0×3 + P1×5）：**
+- P0-1: Demo/实盘止损模式自动切换（避免双重止损）
+- P0-2: 止损单失败 TG 告警
+- P0-3: Demo 余额计算加未平仓保证金扣除
+- P1-1: 7处 `except Exception: pass` 全部加日志
+- P1-2: 日亏损归零定时任务（cron UTC 00:00）
+- P1-4: exchange 提前创建复用 + handle_take_profit 接入全仓平仓
+- P1-5: `_get_price_precision` 步长→位数转换修复
+
+**Round 2 — commit `e9a233c`（P2×3）：**
+- P2-2: pyproject.toml 加 `[tool.mypy]` 配置
+- P2-3: 止盈阶梯/交易间隔/max_positions 魔法数字提取到 settings
+- P2-4: handle_take_profit 已合并到 P1-4B 修复
 
 ## 已知坑
 - `utils/symbol.py` 处理币安合约标的格式差异，新增标的注意测试
