@@ -221,16 +221,17 @@ def run_backtest(
                     if score >= threshold and not pd.isna(score) and atr > 0:
                         stop_dist = 2 * atr
                         if stop_dist > 0 and capital > 0:
-                            # 可用资金 = 总资金 - 已占用资金（每个持仓的剩余百分比 × 入场资金）
+                            # 可用资金 = 总资金 - 已占用
                             committed = sum(p.entry_capital * p.remaining_pct for p in positions.values())
                             available = max(capital - committed, 0)
-                            if available < 1:  # 最低 1u 才开仓
+                            if available < 1:
                                 continue
-                            size_pct = min(available * risk_per_trade / (stop_dist * lev), 1.0)
+                            # Bug修复: entry_price / stop_dist 归一化，保证每笔亏损 = available × 2%
+                            size_pct = min(risk_per_trade * price / (stop_dist * lev), 1.0)
                             if size_pct > 0:
                                 positions[sym] = Position(
                                     symbol=sym, entry_price=price, entry_time=ts,
-                                    entry_capital=available,  # 用可用资金，不是全部资金
+                                    entry_capital=available,
                                     stop_loss=price - stop_dist,
                                     stop_loss_distance=stop_dist,
                                     remaining_pct=size_pct,
