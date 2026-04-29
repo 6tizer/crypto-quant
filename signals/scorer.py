@@ -34,30 +34,19 @@ def compute_strategy_a_score(
 ) -> float:
     """策略 A（追高）加权打分。
 
-    权重从 settings 读取：
-    - momentum: 0.35
-    - square_heat: 0.25（阶段 5 才有，暂不参与）
-    - oi_divergence: 0.20
-    - whitelist: 0.10
-    - kronos: 0.10（阶段 5 后补，暂不参与）
+    权重已归一化（3 个信号权重之和 = 1.0）：
+    - momentum: 0.54
+    - oi_divergence: 0.31
+    - whitelist: 0.15
 
-    缺失信号的权重按比例重新分配给已有信号。
+    直接加权求和，无需再除以权重总和。
     """
-    # 有值的信号和权重
-    signals = {
-        "momentum": (momentum_score, settings.weight_a_momentum),
-        "oi_divergence": (oi_divergence_score, settings.weight_a_oi_divergence),
-        "whitelist": (whitelist_score, settings.weight_a_whitelist),
-        "fear_greed": (fear_greed_score, 0.05),  # 小权重辅助
-    }
-
-    total_weight = sum(w for _, w in signals.values())
-    if total_weight <= 0:
-        return 0.0
-
-    weighted_sum = sum(score * weight for score, weight in signals.values())
-    # 归一化到 0-1（权重总和可能 < 1.0 因为缺 square_heat 和 kronos）
-    return min(1.0, weighted_sum / total_weight)
+    score = (
+        momentum_score * settings.weight_a_momentum
+        + oi_divergence_score * settings.weight_a_oi_divergence
+        + whitelist_score * settings.weight_a_whitelist
+    )
+    return min(1.0, max(0.0, score))
 
 
 def score_all_symbols() -> list[dict]:

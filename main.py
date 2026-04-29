@@ -151,6 +151,13 @@ def main() -> None:
         id="signal_scorer",
         name="信号打分",
     )
+    scheduler.add_job(
+        run_trading_cycle,
+        "interval",
+        seconds=300,
+        id="trading_cycle",
+        name="交易循环",
+    )
 
     # Notion 看板推送
     scheduler.add_job(
@@ -211,3 +218,64 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def run_trading_cycle() -> None:
+    """交易循环：检查信号 → 开仓 → 检查持仓止损/止盈。"""
+    log.info("trading_cycle_start")
+    try:
+        from execution.order_manager import place_market_long, get_top_signals
+        from execution.position_monitor import poll_positions
+        from execution.risk_guard import check_risk_status
+        from data.db.models import Trade, get_session
+        from sqlalchemy import func as sa_func
+
+        session = get_session(settings.database_url)
+        try:
+            # 1. 风控检查
+            risk = check_risk_status(session=session)
+            if risk.get("blocked"):
+                log.info("trading_blocked_by_risk", reason=risk.get("reason"))
+                return
+
+            # 2. 检查现有持仓止损/止盈
+            try:
+                poll_positions(session=session)
+            except Exception as e:
+                log.error("poll_positions_error", error=str(e))
+
+            # 3. 检查当前持仓数量
+            open_count = session.query(sa_func.count(Trade.id)).filter(
+                Trade.status == "open"
+            ).scalar() or 0
+
+            if open_count >= settings.max_positions:
+                log.info("max_positions_reached", count=open_count)
+                return
+
+            # 4. 获取 Top 信号
+            slots = settings.max_positions - open_count
+            signals = get_top_signals(limit=slots, session=session)
+
+            if not signals:
+                log.info("no_signals_above_threshold")
+                return
+
+            # 5. 逐个开仓
+            for sig in signals:
+                try:
+                    place_market_long(
+                        symbol=sig["symbol"],
+                        signal_score_id=sig.get("signal_score_id"),
+                        session=session,
+                    )
+                    log.info("trade_opened", symbol=sig["symbol"], score=sig.get("score"))
+                except Exception as e:
+                    log.error("trade_open_failed", symbol=sig["symbol"], error=str(e))
+
+        finally:
+            session.close()
+
+    except Exception as e:
+        log.error("trading_cycle_error", error=str(e))
+    log.info("trading_cycle_done")

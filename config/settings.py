@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     leverage_strategy_a: int = 5              # 策略 A 杠杆
     leverage_strategy_b: int = 3              # 策略 B 杠杆
     initial_capital: float = 100.0            # 初始资金 (u)
-    entry_threshold: float = 0.50             # 入场阈值（v5回测确认）
+    entry_threshold: float = 0.05             # 入场阈值（v5回测确认）
     risk_per_trade: float = 0.02                # 单笔风险占 equity 的比例
 
     # === 风控参数 ===
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     tg_chat_id: str = ""                      # Telegram Chat ID
 
     # === 信号参数 ===
-    momentum_threshold: float = 2.5           # 涨幅异动倍数 (N 倍 20 日标准差)
+    momentum_threshold: float = 1.5           # 涨幅异动倍数 (N 倍 20 日标准差)
     oi_change_threshold: float = 15.0         # OI 48h 变动阈值 %
     oi_price_divergence_threshold: float = 3.0  # OI 背离价格变动阈值 %
     whitelist_listed_days: int = 180          # 新币白名单天数
@@ -57,11 +57,11 @@ class Settings(BaseSettings):
     strategy_switch_threshold: float = 1.5    # 策略切换阈值
 
     # === 信号权重（策略 A） ===
-    weight_a_momentum: float = 0.35
-    weight_a_square_heat: float = 0.25        # 阶段 5 才有数据
-    weight_a_oi_divergence: float = 0.20
-    weight_a_whitelist: float = 0.10
-    weight_a_kronos: float = 0.10             # 阶段 5 后补
+    weight_a_momentum: float = 0.54
+    weight_a_square_heat: float = 0.0        # 阶段 5 才有数据
+    weight_a_oi_divergence: float = 0.31
+    weight_a_whitelist: float = 0.15
+    weight_a_kronos: float = 0.0             # 阶段 5 后补
 
     # === 信号权重（策略 B） ===
     weight_b_kronos: float = 0.25
