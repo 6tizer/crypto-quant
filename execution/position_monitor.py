@@ -74,6 +74,7 @@ def poll_positions(
                 symbol=symbol,
                 exchange=exchange,
                 trade=trade,
+                session=session,
             )
 
             if action:
@@ -104,6 +105,7 @@ def _evaluate_tp_rules(
     symbol: str,
     exchange: ccxt.binanceusdm,
     trade: Trade | None = None,
+    session: DBSession | None = None,
 ) -> dict[str, Any] | None:
     if entry_price <= 0 or mark_price <= 0:
         return None
@@ -143,7 +145,7 @@ def _evaluate_tp_rules(
     if profit_multiple >= TP_SELL_75PCT and not (trade and trade.closed_3x):
         try:
             _partial_close(exchange, symbol, ratio=0.75)
-            if trade:
+            if trade and session:
                 trade.closed_3x = True
                 session.commit()
             _update_stop_loss(exchange, symbol, entry_price * 1.001)  # 保本
@@ -159,7 +161,7 @@ def _evaluate_tp_rules(
     if profit_multiple >= TP_HALF_AND_BREAKEVEN and not (trade and trade.half_closed):
         try:
             _partial_close(exchange, symbol, ratio=0.5)
-            if trade:
+            if trade and session:
                 trade.half_closed = True
                 session.commit()
             _update_stop_loss(exchange, symbol, entry_price)  # 保本
