@@ -15,6 +15,8 @@ def simulate_strategy_a(
     entry_threshold: float = 0.65,
     stop_loss_pct: float = 0.20,
     initial_capital: float = 100.0,
+    taker_fee_rate: float = 0.0004,
+    position_size_pct: float = 0.3,
 ) -> dict:
     """对单个币种模拟策略 A 交易。
 
@@ -51,6 +53,29 @@ def simulate_strategy_a(
     max_drawdown = 0
     trades = []
     position = None  # {entry_price, entry_time, stop_loss, size}
+    lev = settings.leverage_strategy_a
+
+    def _close_trade(entry_price, exit_price, entry_time, exit_time, reason):
+        """平仓并扣除双边手续费。"""
+        nonlocal capital
+        pnl_pct = (exit_price - entry_price) / entry_price
+        position_size = capital * position_size_pct  # 每笔只用部分资金
+        pnl = position_size * pnl_pct * lev
+        # 手续费：开仓 + 平仓，按名义值计算
+        fee = position_size * taker_fee_rate * lev * 2
+        net_pnl = pnl - fee
+        capital += net_pnl
+        trades.append({
+            "entry_time": entry_time,
+            "exit_time": exit_time,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "pnl_pct": pnl_pct * 100,
+            "pnl": net_pnl,
+            "fee": fee,
+            "exit_reason": reason,
+            "hold_hours": (exit_time - entry_time).total_seconds() / 3600,
+        })
 
     for _, row in df.iterrows():
         ts = row["timestamp"]
@@ -59,19 +84,7 @@ def simulate_strategy_a(
         if position:
             # 检查止损
             if price <= position["stop_loss"]:
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                pnl = capital * pnl_pct * settings.leverage_strategy_a
-                capital += pnl
-                trades.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": price,
-                    "pnl_pct": pnl_pct * 100,
-                    "pnl": pnl,
-                    "exit_reason": "stop_loss",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
+                _close_trade(position["entry_price"], price, position["entry_time"], ts, "stop_loss")
                 position = None
                 continue
 
@@ -80,37 +93,13 @@ def simulate_strategy_a(
 
             # 48h 强制平
             if (ts - position["entry_time"]) > timedelta(hours=48):
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                pnl = capital * pnl_pct * settings.leverage_strategy_a
-                capital += pnl
-                trades.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": price,
-                    "pnl_pct": pnl_pct * 100,
-                    "pnl": pnl,
-                    "exit_reason": "timeout_48h",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
+                _close_trade(position["entry_price"], price, position["entry_time"], ts, "timeout_48h")
                 position = None
                 continue
 
             # 10x 平半（简化：直接全平）
             if pnl_ratio >= 10:
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                pnl = capital * pnl_pct * settings.leverage_strategy_a
-                capital += pnl
-                trades.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": price,
-                    "pnl_pct": pnl_pct * 100,
-                    "pnl": pnl,
-                    "exit_reason": "take_profit_10x",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
+                _close_trade(position["entry_price"], price, position["entry_time"], ts, "take_profit_10x")
                 position = None
                 continue
 
@@ -162,6 +151,7 @@ def simulate_strategy_a(
         "profit_factor": profit_factor,
         "avg_hold_hours": sum(t["hold_hours"] for t in trades) / len(trades),
         "max_drawdown_pct": max_drawdown * 100,
+        "trades_list": trades,
         "exit_reasons": {
             "stop_loss": sum(1 for t in trades if t["exit_reason"] == "stop_loss"),
             "take_profit_10x": sum(1 for t in trades if t["exit_reason"] == "take_profit_10x"),
@@ -171,48 +161,70 @@ def simulate_strategy_a(
 
 
 def run_backtest(thresholds: list[float] = None) -> pd.DataFrame:
-    """运行多阈值回测，输出对比报告。"""
+    """运行多阈值回测，每个阈值独立输出完整报告。"""
     from backtest.data_downloader import download_top_symbols
 
     if thresholds is None:
-        thresholds = [0.3, 0.4, 0.5, 0.65]
+        thresholds = [round(0.30 + i * 0.05, 2) for i in range(8)]  # 0.30~0.65
 
     log.info("backtest_start", thresholds=thresholds)
 
     # 下载数据（有缓存）
-    data = download_top_symbols(top_n=30, days=90)  # 30 个够用
+    data = download_top_symbols(top_n=30, days=90)
     log.info("data_loaded", symbols=len(data))
 
     results = []
     for threshold in thresholds:
-        all_trades = []
-        total_pnl = 0
-        total_wins = 0
-        total_losses = 0
-        symbols_tested = 0
+        agg = {
+            "total_trades": 0, "total_wins": 0, "total_losses": 0,
+            "total_pnl": 0, "total_fee": 0,
+            "sum_win_pnl": 0, "sum_loss_pnl": 0,
+            "max_drawdown_pct": 0, "sum_hold_hours": 0,
+            "symbols_tested": 0,
+            "stop_loss_count": 0, "timeout_count": 0, "tp_10x_count": 0,
+        }
 
         for sym, df in data.items():
             r = simulate_strategy_a(df, entry_threshold=threshold)
             if r["trades"] > 0:
-                all_trades.append(r)
-                total_pnl += r["total_pnl"]
-                total_wins += r["wins"]
-                total_losses += r["losses"]
-                symbols_tested += 1
+                agg["total_trades"] += r["trades"]
+                agg["total_wins"] += r["wins"]
+                agg["total_losses"] += r["losses"]
+                agg["total_pnl"] += r["total_pnl"]
+                agg["total_fee"] += sum(t.get("fee", 0) for t in r.get("trades_list", []))
+                agg["sum_hold_hours"] += sum(t["hold_hours"] for t in r.get("trades_list", []))
+                agg["max_drawdown_pct"] = max(agg["max_drawdown_pct"], r.get("max_drawdown_pct", 0))
+                agg["stop_loss_count"] += r["exit_reasons"]["stop_loss"]
+                agg["timeout_count"] += r["exit_reasons"]["timeout_48h"]
+                agg["tp_10x_count"] += r["exit_reasons"]["take_profit_10x"]
+                agg["symbols_tested"] += 1
+                # 需要逐笔统计盈亏
+                wins_pnl = [t["pnl"] for t in (r.get("trades_list", [])) if t["pnl"] > 0]
+                losses_pnl = [abs(t["pnl"]) for t in (r.get("trades_list", [])) if t["pnl"] <= 0]
+                agg["sum_win_pnl"] += sum(wins_pnl)
+                agg["sum_loss_pnl"] += sum(losses_pnl)
 
-        total = total_wins + total_losses
-        win_rate = total_wins / total * 100 if total > 0 else 0
-        avg_pnl = total_pnl / symbols_tested if symbols_tested > 0 else 0
+        total = agg["total_trades"]
+        wr = agg["total_wins"] / total * 100 if total > 0 else 0
+        avg_win = agg["sum_win_pnl"] / agg["total_wins"] if agg["total_wins"] > 0 else 0
+        avg_loss = agg["sum_loss_pnl"] / agg["total_losses"] if agg["total_losses"] > 0 else 0
+        profit_ratio = avg_win / avg_loss if avg_loss > 0 else float("inf")
+        avg_hold = agg["sum_hold_hours"] / total if total > 0 else 0
 
         results.append({
             "threshold": threshold,
-            "symbols_tested": symbols_tested,
-            "total_trades": total,
-            "wins": total_wins,
-            "losses": total_losses,
-            "win_rate": win_rate,
-            "total_pnl": total_pnl,
-            "avg_pnl_per_symbol": avg_pnl,
+            "trades": total,
+            "wins": agg["total_wins"],
+            "losses": agg["total_losses"],
+            "win_rate": round(wr, 1),
+            "profit_ratio": round(profit_ratio, 2),
+            "total_pnl": round(agg["total_pnl"], 2),
+            "total_fee": round(agg["total_fee"], 2),
+            "max_drawdown_pct": round(agg["max_drawdown_pct"], 1),
+            "avg_hold_hours": round(avg_hold, 1),
+            "stop_loss": agg["stop_loss_count"],
+            "timeout_48h": agg["timeout_count"],
+            "tp_10x": agg["tp_10x_count"],
         })
 
     report = pd.DataFrame(results)
@@ -221,12 +233,21 @@ def run_backtest(thresholds: list[float] = None) -> pd.DataFrame:
 
 if __name__ == "__main__":
     report = run_backtest()
-    print("\n" + "=" * 70)
-    print("回测报告 — 策略 A（追高）不同入场阈值对比")
-    print("=" * 70)
+    print("\n" + "=" * 90)
+    print("回测报告 — 策略 A（追高）阈值扫参（含手续费 taker 0.04%/边）")
+    print("=" * 90)
     print(report.to_string(index=False))
     print()
 
-    # 找最优
-    best = report.loc[report["win_rate"].idxmax()]
-    print(f"最优阈值: {best['threshold']} | 胜率: {best['win_rate']:.1f}% | 总交易: {int(best['total_trades'])} | 总盈亏: {best['total_pnl']:.2f}u")
+    # 三条件筛选：胜率>35%, 盈亏比>2, 回撤<30%
+    valid = report[(report["win_rate"] > 35) & (report["profit_ratio"] > 2) & (report["max_drawdown_pct"] < 30)]
+    if len(valid) > 0:
+        best = valid.loc[valid["total_pnl"].idxmax()]
+        print(f"✅ 最优阈值: {best['threshold']} | 胜率: {best['win_rate']:.1f}% | 盈亏比: {best['profit_ratio']:.2f} | "
+              f"收益: {best['total_pnl']:.2f}u | 回撤: {best['max_drawdown_pct']:.1f}% | 交易: {int(best['trades'])}笔")
+    else:
+        print("⚠️ 无阈值同时满足三条件（胜率>35%, 盈亏比>2, 回撤<30%）")
+        print("放宽条件后最优（按收益）：")
+        best = report.loc[report["total_pnl"].idxmax()]
+        print(f"  阈值: {best['threshold']} | 胜率: {best['win_rate']:.1f}% | 盈亏比: {best['profit_ratio']:.2f} | "
+              f"收益: {best['total_pnl']:.2f}u | 回撤: {best['max_drawdown_pct']:.1f}%")
