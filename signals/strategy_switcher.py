@@ -32,17 +32,30 @@ def get_strategy_weights() -> dict:
         )
 
         # 获取山寨币平均波动率（排除 BTC/ETH/黄金/白银等）
+        # 先取每个 symbol 最新快照，再算平均值
         exclude = ["BTC/USDT", "ETH/USDT", "XAU/USDT", "XAG/USDT", "CL/USDT", "PAXG/USDT", "TSLA/USDT"]
-        alt_snaps = (
-            session.query(MarketSnapshot)
+        subq = (
+            session.query(
+                MarketSnapshot.symbol,
+                func.max(MarketSnapshot.captured_at).label("max_ts"),
+            )
             .filter(
                 MarketSnapshot.volatility_20d > 0,
                 ~MarketSnapshot.symbol.in_(exclude),
             )
-            .order_by(desc(MarketSnapshot.captured_at))
-            .limit(30)
+            .group_by(MarketSnapshot.symbol)
+            .subquery()
+        )
+        alt_vols = (
+            session.query(MarketSnapshot.volatility_20d)
+            .join(
+                subq,
+                (MarketSnapshot.symbol == subq.c.symbol)
+                & (MarketSnapshot.captured_at == subq.c.max_ts),
+            )
             .all()
         )
+        alt_vol = sum(v[0] for v in alt_vols) / len(alt_vols) if alt_vols else 0
 
         # 获取最新恐贪指数
         fear_greed = (
@@ -52,11 +65,6 @@ def get_strategy_weights() -> dict:
         )
 
         btc_vol = btc_snap.volatility_20d if btc_snap else 0
-        alt_vol = (
-            sum(s.volatility_20d for s in alt_snaps) / len(alt_snaps)
-            if alt_snaps
-            else 0
-        )
         fg_value = fear_greed.value if fear_greed else 50
 
         # 恐贪暂停检查

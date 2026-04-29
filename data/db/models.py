@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     create_engine,
 )
+from sqlalchemy import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -133,14 +134,23 @@ class FearGreedHistory(Base):
 
 def init_db(db_url: str) -> sessionmaker:
     """初始化数据库，返回 Session 工厂"""
-    engine = create_engine(db_url, echo=False)
+    engine = _get_engine(db_url)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
 
 
 def get_session(db_url: str) -> Session:
-    """获取一个数据库 session"""
-    engine = create_engine(db_url, echo=False)
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
+    """获取一个数据库 session（使用全局 engine 单例）"""
+    factory = init_db(db_url)
     return factory()
+
+
+# 全局 engine 单例，避免每次 get_session 都新建连接
+_engine_cache: dict[str, Engine] = {}
+
+
+def _get_engine(db_url: str) -> Engine:
+    """获取或创建 engine 单例"""
+    if db_url not in _engine_cache:
+        _engine_cache[db_url] = create_engine(db_url, echo=False, pool_pre_ping=True)
+    return _engine_cache[db_url]

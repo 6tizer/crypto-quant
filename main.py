@@ -61,6 +61,44 @@ def run_fear_greed_collector() -> None:
         log.error("fear_greed_collector_error", error=str(e))
 
 
+def run_signal_scorer() -> None:
+    """定时信号打分 + 推送排行榜"""
+    log.info("signal_scorer_start")
+    try:
+        from signals.scorer import score_all_symbols
+        results = score_all_symbols()
+        log.info("signal_scorer_done", count=len(results), top3=[r["symbol"] for r in results[:3]])
+    except Exception as e:
+        log.error("signal_scorer_error", error=str(e))
+
+
+def run_push_signal_ranking() -> None:
+    """推送信号排行榜到 Notion"""
+    try:
+        from data.push.notion_dashboard import push_signal_ranking
+        push_signal_ranking()
+    except Exception as e:
+        log.error("push_signal_ranking_error", error=str(e))
+
+
+def run_push_daily_market() -> None:
+    """推送每日市场概况到 Notion"""
+    try:
+        from data.push.notion_dashboard import push_daily_market
+        push_daily_market()
+    except Exception as e:
+        log.error("push_daily_market_error", error=str(e))
+
+
+def run_push_system_status() -> None:
+    """推送系统状态到 Notion"""
+    try:
+        from data.push.notion_dashboard import push_system_status
+        push_system_status()
+    except Exception as e:
+        log.error("push_system_status_error", error=str(e))
+
+
 def main() -> None:
     setup_logging()
     log.info("crypto_quant_starting", settings={
@@ -101,6 +139,38 @@ def main() -> None:
         seconds=settings.collect_interval_fear_greed,
         id="fear_greed_collector",
         name="恐贪指数采集",
+    )
+
+    # 信号打分（每 5min，跟行情采集同步）
+    scheduler.add_job(
+        run_signal_scorer,
+        "interval",
+        seconds=settings.collect_interval_market,
+        id="signal_scorer",
+        name="信号打分",
+    )
+
+    # Notion 看板推送
+    scheduler.add_job(
+        run_push_signal_ranking,
+        "interval",
+        minutes=60,
+        id="push_signal_ranking",
+        name="推送信号排行榜",
+    )
+    scheduler.add_job(
+        run_push_daily_market,
+        "interval",
+        hours=24,
+        id="push_daily_market",
+        name="推送每日市场概况",
+    )
+    scheduler.add_job(
+        run_push_system_status,
+        "interval",
+        minutes=60,
+        id="push_system_status",
+        name="推送系统状态",
     )
 
     # 启动时立即跑一次

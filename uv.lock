@@ -373,6 +373,7 @@ dependencies = [
     { name = "ccxt" },
     { name = "httpx" },
     { name = "pydantic-settings" },
+    { name = "requests" },
     { name = "sqlalchemy" },
     { name = "structlog" },
 ]
@@ -388,6 +389,7 @@ requires-dist = [
     { name = "ccxt", specifier = ">=4.5.51" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pydantic-settings", specifier = ">=2.14.0" },
+    { name = "requests", specifier = ">=2.33.1" },
     { name = "sqlalchemy", specifier = ">=2.0.49" },
     { name = "structlog", specifier = ">=25.5.0" },
 ]

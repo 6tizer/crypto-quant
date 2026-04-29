@@ -5,9 +5,25 @@ from datetime import datetime, timezone
 import structlog
 
 from config.settings import settings
-from data.db.models import SignalScore, get_session
+from data.db.models import FearGreedHistory, SignalScore, get_session
 
 log = structlog.get_logger()
+
+
+def _get_fear_greed_score() -> float:
+    """从 fear_greed_history 读最新值，归一化到 0-1。
+
+    恐贪 0-100 映射：>=80 → 1.0（极度贪婪），<=20 → 0.0（极度恐惧），线性插值。
+    """
+    session = get_session(settings.database_url)
+    try:
+        from sqlalchemy import desc
+        row = session.query(FearGreedHistory).order_by(desc(FearGreedHistory.timestamp)).first()
+        if row:
+            return max(0.0, min(1.0, (row.value - 20) / 60))
+        return 0.5  # 无数据时中性
+    finally:
+        session.close()
 
 
 def compute_strategy_a_score(
@@ -60,6 +76,9 @@ def score_all_symbols() -> list[dict]:
     # 构建 whitelist 查找表
     wl_map = {r["symbol"]: r["whitelist_score"] for r in whitelist_results}
 
+    # 1.5 读最新恐贪指数
+    fg_score = _get_fear_greed_score()
+
     # 2. 综合打分
     scored = []
     for m in momentum_results:
@@ -68,6 +87,7 @@ def score_all_symbols() -> list[dict]:
             momentum_score=m["momentum_score"],
             oi_divergence_score=m["oi_divergence_score"],
             whitelist_score=wl_map.get(sym, 0),
+            fear_greed_score=fg_score,
         )
         scored.append({
             "symbol": sym,
@@ -97,7 +117,7 @@ def score_all_symbols() -> list[dict]:
                 score_sopr=0,         # 阶段 2+
                 score_kronos=0,       # 阶段 5+
                 score_smart_money=0,  # 阶段 5+
-                score_fear_greed=0,   # 后补
+                score_fear_greed=fg_score,   # 从 DB 读
                 strategy_type=s["strategy_type"],
                 captured_at=now,
             )
