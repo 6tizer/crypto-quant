@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     max_drawdown_pct: float = 30.0            # 总回撤暂停线 %
     fear_greed_pause_line: int = 15           # 恐贪暂停线
 
+    # === 通知 ===
+    tg_bot_token: str = ""                    # Telegram Bot Token
+    tg_chat_id: str = ""                      # Telegram Chat ID
+
     # === 信号参数 ===
     momentum_threshold: float = 2.5           # 涨幅异动倍数 (N 倍 20 日标准差)
     oi_change_threshold: float = 15.0         # OI 48h 变动阈值 %

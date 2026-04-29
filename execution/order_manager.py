@@ -125,6 +125,10 @@ def place_market_long(
 
         log.info("market_order_filled", symbol=symbol, order_id=order_id, qty=filled_qty, price=avg_price)
 
+        # TG 通知
+        from notifications.tg import notify_trade_open
+        notify_trade_open(symbol, 0, avg_price, size_result.stop_loss_price)
+
         # ========== 8. 下止损限价单 ==========
         stop_order = None
         stop_order_id = None

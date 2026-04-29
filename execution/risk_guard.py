@@ -64,6 +64,8 @@ def check_risk_status(
             state.pause_until = pause_until
             session.commit()
             log.warning("paused_consecutive_stops", consecutive=state.consecutive_stops, until=pause_until.isoformat())
+            from notifications.tg import notify_risk_pause
+            notify_risk_pause(state.pause_reason)
             return False, state.pause_reason
 
         # 3. 检查单日亏损
