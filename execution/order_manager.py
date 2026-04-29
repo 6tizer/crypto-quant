@@ -20,7 +20,6 @@ from execution.portfolio import (
     calculate_position_size,
     can_open_new_position,
     get_account_balance,
-    get_stop_loss_amount,
     get_trading_exchange,
 )
 from execution.risk_guard import check_risk_status, record_stop_loss
@@ -34,6 +33,7 @@ def place_market_long(
     strategy_type: str = "A",
     exchange: ccxt.binanceusdm | None = None,
     session: DBSession | None = None,
+    atr: float = 0.0,  # P1-⑤: ATR for stop loss distance
 ) -> dict[str, Any] | None:
     """执行市价买入开多 + 联动止损限价单。
 
@@ -90,6 +90,7 @@ def place_market_long(
             equity=equity,
             entry_price=mark_price,
             strategy_type=strategy_type,
+            atr=atr,  # P1-⑤
         )
         if size_result is None:
             log.warning("position_size_calc_failed", symbol=symbol)

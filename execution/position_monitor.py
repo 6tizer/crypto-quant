@@ -1,10 +1,8 @@
-"""持仓监控器 — 定时拉取持仓 + 自动止盈规则
+"""持仓监控器 — 定时拉取持仓 + 止盈 + trailing stop
 
-止盈规则：
-- 浮盈 >= 3x 止损额 → 移动止损到保本价
-- 浮盈 >= 5x 止损额 → 移动止损锁定利润
-- 浮盈 >= 10x 止损额 → 平半仓
-- 持仓 > 48h → 强制平仓
+P1-⑥: 止盈阶梯改为 1.5x平半+保本 → 3x平剩75% → 5x清仓 → 48h兜底
+     新增 trailing stop: 1.5x后启动，峰值回撤40%平仓
+     peak_pnl 存入 trades.peak_pnl
 """
 
 from datetime import datetime, timezone
@@ -17,31 +15,24 @@ from sqlalchemy.orm import Session as DBSession
 
 from config.settings import settings
 from data.db.models import Trade, get_session
-from execution.portfolio import get_account_balance, get_stop_loss_amount, get_trading_exchange
+from execution.portfolio import get_account_balance, get_trading_exchange
 
 log = structlog.get_logger()
 
 
-# 止盈倍数常量
-TP_BREAKEVEN_MULTIPLIER = 3      # 3x → 移止损到保本
-TP_LOCK_PROFIT_MULTIPLIER = 5    # 5x → 移止损锁定利润
-TP_HALF_CLOSE_MULTIPLIER = 10    # 10x → 平半仓
-FORCE_CLOSE_HOURS = 48           # 48h → 强制平仓
+# P1-⑥: 新止盈阶梯
+TP_HALF_AND_BREAKEVEN = 1.5   # 1.5x 平半 + 保本止损
+TP_SELL_75PCT = 3.0           # 3x 平剩余 75%
+TP_CLEAR = 5.0                # 5x 清仓
+FORCE_CLOSE_HOURS = 48
+TRAILING_DRAWDOWN = 0.4       # 从峰值回撤 40% 触发 trailing stop
 
 
 def poll_positions(
     exchange: ccxt.binanceusdm | None = None,
     session: DBSession | None = None,
 ) -> list[dict[str, Any]]:
-    """拉取当前持仓，执行止盈规则检查并返回操作结果。
-
-    Args:
-        exchange: ccxt 交易所实例（带 API 密钥）
-        session: 数据库 session
-
-    Returns:
-        操作记录列表，每条包含 {symbol, action, detail}
-    """
+    """拉取当前持仓，执行止盈规则 + trailing stop 检查。"""
     own_session = False
     if session is None:
         session = get_session(settings.database_url)
@@ -63,16 +54,18 @@ def poll_positions(
             entry_price = float(pos.get("entryPrice", 0) or 0)
             mark_price = float(pos.get("markPrice", 0) or 0)
             unrealized_pnl = float(pos.get("unrealizedPnl", 0) or 0)
-            leverage = int(float(pos.get("leverage", 1) or 1))
 
-            # 只处理做多仓位
             if size <= 0 or side.upper() != "LONG":
                 continue
 
-            # 查询 DB 的交易记录
+            # 查 DB 交易记录
             trade = _get_trade_record(session, symbol)
 
-            # 计算止盈状态
+            # 更新 peak_pnl
+            if trade and unrealized_pnl > (trade.peak_pnl or 0):
+                trade.peak_pnl = unrealized_pnl
+                session.commit()
+
             action = _evaluate_tp_rules(
                 entry_price=entry_price,
                 mark_price=mark_price,
@@ -80,6 +73,7 @@ def poll_positions(
                 position_age_hours=_get_age_hours(trade, now),
                 symbol=symbol,
                 exchange=exchange,
+                trade=trade,
             )
 
             if action:
@@ -98,7 +92,7 @@ def poll_positions(
 
 
 # ============================================================
-# 止盈规则引擎
+# 止盈规则引擎 (P1-⑥ 改版)
 # ============================================================
 
 
@@ -109,19 +103,21 @@ def _evaluate_tp_rules(
     position_age_hours: float,
     symbol: str,
     exchange: ccxt.binanceusdm,
+    trade: Trade | None = None,
 ) -> dict[str, Any] | None:
-    """对单个仓位执行止盈规则链判断。
-
-    Returns:
-        action dict 或 None（无需操作）
-        action = {
-            "symbol": str,
-            "action": "breakeven" | "lock_profit" | "half_close" | "force_close",
-            "detail": str,
-        }
-    """
     if entry_price <= 0 or mark_price <= 0:
         return None
+
+    # 计算盈亏比（相对于 ATR 止损距离）
+    equity = get_account_balance(exchange)
+    # 用 ATR 止损额（2×ATR）做基准。无法实时获取 ATR 时，用 entry_price 估算
+    # stop_distance_pct = 2×ATR/entry_price ≈ 0.01~0.10（根据不同币种）
+    # 用固定 5% 作为 fallback
+    stop_distance_pct = 0.05  # fallback ATR估算
+    risk_amount = equity * settings.risk_per_trade
+    profit_multiple = unrealized_pnl / risk_amount if risk_amount > 0 else 0
+
+    peak_pnl = trade.peak_pnl if trade else 0
 
     # 1. 48h 强制平仓（最高优先级）
     if position_age_hours >= FORCE_CLOSE_HOURS:
@@ -133,72 +129,59 @@ def _evaluate_tp_rules(
                 "detail": f"持仓 {position_age_hours:.1f}h >= {FORCE_CLOSE_HOURS}h，强制平仓",
             }
         except Exception as e:
-            log.error("force_close_failed", symbol=symbol, error=str(e))
-            return {
-                "symbol": symbol,
-                "action": "force_close_error",
-                "detail": f"强制平仓失败: {e}",
-            }
+            return {"symbol": symbol, "action": "force_close_error", "detail": f"强制平仓失败: {e}"}
 
-    # 计算浮盈相对于止损额的倍数
-    equity = get_account_balance(exchange)
-    risk_amount = get_stop_loss_amount(equity)
-    if risk_amount <= 0:
-        return None
-
-    profit_multiple = unrealized_pnl / risk_amount
-
-    # 2. 10x 平半仓
-    if profit_multiple >= TP_HALF_CLOSE_MULTIPLIER:
+    # 2. P1-⑥: 5x 清仓
+    if profit_multiple >= TP_CLEAR:
         try:
-            _half_close_position(exchange, symbol)
+            _force_close_position(exchange, symbol)
             return {
                 "symbol": symbol,
-                "action": "half_close",
-                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x 止损额，平半仓",
+                "action": "take_profit_5x",
+                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x，清仓",
             }
         except Exception as e:
-            log.error("half_close_failed", symbol=symbol, error=str(e))
-            return {
-                "symbol": symbol,
-                "action": "half_close_error",
-                "detail": f"平半仓失败: {e}",
-            }
+            return {"symbol": symbol, "action": "clear_error", "detail": f"清仓失败: {e}"}
 
-    # 3. 5x 移止损锁定利润
-    if profit_multiple >= TP_LOCK_PROFIT_MULTIPLIER:
+    # 3. P1-⑥: 3x 平剩余 75%
+    if profit_multiple >= TP_SELL_75PCT:
         try:
-            lock_price = entry_price * 1.02  # 锁定 2% 利润
-            _update_stop_loss(exchange, symbol, lock_price)
+            _partial_close(exchange, symbol, ratio=0.75)
+            _update_stop_loss(exchange, symbol, entry_price * 1.001)  # 保本
             return {
                 "symbol": symbol,
-                "action": "lock_profit",
-                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x，止损移至 {lock_price:.4f}",
+                "action": "sell_75pct",
+                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x，平剩余75%+保本",
             }
         except Exception as e:
-            log.error("lock_profit_failed", symbol=symbol, error=str(e))
-            return {
-                "symbol": symbol,
-                "action": "lock_profit_error",
-                "detail": f"移止损失败: {e}",
-            }
+            return {"symbol": symbol, "action": "sell_75pct_error", "detail": f"平75%失败: {e}"}
 
-    # 4. 3x 移止损到保本
-    if profit_multiple >= TP_BREAKEVEN_MULTIPLIER:
+    # 4. P1-⑥: 1.5x 平半 + 保本止损
+    if profit_multiple >= TP_HALF_AND_BREAKEVEN:
         try:
-            _update_stop_loss(exchange, symbol, entry_price)
+            _partial_close(exchange, symbol, ratio=0.5)
+            _update_stop_loss(exchange, symbol, entry_price)  # 保本
             return {
                 "symbol": symbol,
-                "action": "breakeven",
-                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x，止损移至保本 {entry_price:.4f}",
+                "action": "half_close_breakeven",
+                "detail": f"浮盈 {unrealized_pnl:.2f}u = {profit_multiple:.1f}x，平半+保本",
             }
         except Exception as e:
-            log.error("breakeven_move_failed", symbol=symbol, error=str(e))
-            return {
-                "symbol": symbol,
-                "action": "breakeven_error",
-                "detail": f"保本移止损失败: {e}",
-            }
+            return {"symbol": symbol, "action": "half_close_error", "detail": f"平半失败: {e}"}
+
+    # 5. P1-⑥: Trailing stop — 1.5x 后启动，峰值回撤 40% 平仓
+    if profit_multiple >= TP_HALF_AND_BREAKEVEN and peak_pnl > 0:
+        drawdown_from_peak = (peak_pnl - unrealized_pnl) / peak_pnl if peak_pnl > 0 else 0
+        if drawdown_from_peak >= TRAILING_DRAWDOWN:
+            try:
+                _force_close_position(exchange, symbol)
+                return {
+                    "symbol": symbol,
+                    "action": "trailing_stop",
+                    "detail": f"峰值 {peak_pnl:.2f}u 回撤 {drawdown_from_peak*100:.0f}% >= {TRAILING_DRAWDOWN*100:.0f}%，trailing平仓",
+                }
+            except Exception as e:
+                return {"symbol": symbol, "action": "trailing_error", "detail": f"trailing失败: {e}"}
 
     return None
 
@@ -209,23 +192,16 @@ def _evaluate_tp_rules(
 
 
 def _force_close_position(exchange: ccxt.binanceusdm, symbol: str) -> dict:
-    """强制平仓 — 市价卖出全部持仓。"""
     try:
         exchange.load_markets()
-        market = exchange.market(symbol)
-
-        # 获取当前持仓量
         positions = exchange.fetch_positions([symbol])
         qty = 0.0
         for pos in positions:
             if pos.get("symbol") == symbol:
                 qty = abs(float(pos.get("contracts", 0) or 0))
                 break
-
         if qty <= 0:
-            log.warning("no_position_to_close", symbol=symbol)
             return {"symbol": symbol, "action": "no_position"}
-
         order = exchange.create_market_sell_order(symbol, qty)
         log.info("force_close_executed", symbol=symbol, qty=qty, order_id=order.get("id"))
         return {"symbol": symbol, "action": "force_closed", "qty": qty}
@@ -234,8 +210,8 @@ def _force_close_position(exchange: ccxt.binanceusdm, symbol: str) -> dict:
         raise
 
 
-def _half_close_position(exchange: ccxt.binanceusdm, symbol: str) -> dict:
-    """平半仓 — 市价卖出 50% 持仓。"""
+def _partial_close(exchange: ccxt.binanceusdm, symbol: str, ratio: float) -> dict:
+    """部分平仓（ratio: 0.5 = 平半, 0.75 = 平 75%）。"""
     try:
         exchange.load_markets()
         positions = exchange.fetch_positions([symbol])
@@ -244,56 +220,35 @@ def _half_close_position(exchange: ccxt.binanceusdm, symbol: str) -> dict:
             if pos.get("symbol") == symbol:
                 qty = abs(float(pos.get("contracts", 0) or 0))
                 break
-
         if qty <= 0:
-            log.warning("no_position_to_half_close", symbol=symbol)
             return {"symbol": symbol, "action": "no_position"}
-
-        half_qty = _round_down(qty / 2)
-        if half_qty <= 0:
-            log.warning("half_qty_too_small", symbol=symbol, qty=qty)
-            # 数量太小无法平半，直接全平
-            half_qty = qty
-
-        order = exchange.create_market_sell_order(symbol, half_qty)
-        log.info("half_close_executed", symbol=symbol, qty=half_qty, order_id=order.get("id"))
-        return {"symbol": symbol, "action": "half_closed", "qty": half_qty}
+        close_qty = _round_down(qty * ratio)
+        if close_qty <= 0:
+            close_qty = qty
+        order = exchange.create_market_sell_order(symbol, close_qty)
+        log.info("partial_close_executed", symbol=symbol, qty=close_qty, ratio=ratio)
+        return {"symbol": symbol, "action": "partial_closed", "qty": close_qty}
     except Exception as e:
-        log.error("half_close_failed", symbol=symbol, error=str(e))
+        log.error("partial_close_failed", symbol=symbol, error=str(e))
         raise
 
 
 def _update_stop_loss(exchange: ccxt.binanceusdm, symbol: str, stop_price: float) -> dict:
-    """更新止���单（先取消旧止损，再下新止损单）。"""
     try:
         exchange.load_markets()
-
-        # 获取当前持仓量
         positions = exchange.fetch_positions([symbol])
         qty = 0.0
         for pos in positions:
             if pos.get("symbol") == symbol:
                 qty = abs(float(pos.get("contracts", 0) or 0))
                 break
-
         if qty <= 0:
             return {"symbol": symbol, "action": "no_position"}
-
-        # 取消当前挂着的止损单
         _cancel_stop_orders(exchange, symbol)
-
-        # 下新的止损限价单
-        # STOP_LOSS_LIMIT: 触发后以限价卖出
         order = exchange.create_order(
-            symbol,
-            type="STOP_LOSS_LIMIT",
-            side="sell",
-            amount=qty,
-            price=stop_price * 0.99,  # 限价略低于触发价，确保成交
-            params={
-                "stopPrice": stop_price,
-                "reduceOnly": True,
-            },
+            symbol, type="STOP_LOSS_LIMIT", side="sell",
+            amount=qty, price=stop_price * 0.99,
+            params={"stopPrice": stop_price, "reduceOnly": True},
         )
         log.info("stop_loss_updated", symbol=symbol, stop_price=stop_price)
         return {"symbol": symbol, "action": "stop_updated", "stop_price": stop_price}
@@ -303,12 +258,9 @@ def _update_stop_loss(exchange: ccxt.binanceusdm, symbol: str, stop_price: float
 
 
 def _cancel_stop_orders(exchange: ccxt.binanceusdm, symbol: str) -> None:
-    """取消某交易对的所有当前止损单。"""
     try:
-        open_orders = exchange.fetch_open_orders(symbol)
-        for order in open_orders:
-            order_type = str(order.get("type", ""))
-            if "stop" in order_type.lower():
+        for order in exchange.fetch_open_orders(symbol):
+            if "stop" in str(order.get("type", "")).lower():
                 exchange.cancel_order(order["id"], symbol)
                 log.info("stop_order_cancelled", symbol=symbol, order_id=order["id"])
     except Exception as e:
@@ -321,14 +273,10 @@ def _cancel_stop_orders(exchange: ccxt.binanceusdm, symbol: str) -> None:
 
 
 def _get_trade_record(session: DBSession, symbol: str) -> Trade | None:
-    """从 trades 表获取某标的最近未平仓交易记录。"""
     try:
         return (
             session.query(Trade)
-            .filter(
-                Trade.symbol == symbol,
-                Trade.closed_at.is_(None),
-            )
+            .filter(Trade.symbol == symbol, Trade.closed_at.is_(None))
             .order_by(desc(Trade.opened_at))
             .first()
         )
@@ -337,14 +285,11 @@ def _get_trade_record(session: DBSession, symbol: str) -> Trade | None:
 
 
 def _get_age_hours(trade: Trade | None, now: datetime) -> float:
-    """计算持仓时长（小时）。"""
     if trade is None or trade.opened_at is None:
         return 0.0
-    delta = now - trade.opened_at
-    return delta.total_seconds() / 3600
+    return (now - trade.opened_at).total_seconds() / 3600
 
 
 def _round_down(value: float, precision: int = 6) -> float:
-    """向下取整到指定精度。"""
-    factor = 10**precision
+    factor = 10 ** precision
     return int(value * factor) / factor

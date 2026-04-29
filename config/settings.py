@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     leverage_strategy_a: int = 5              # 策略 A 杠杆
     leverage_strategy_b: int = 3              # 策略 B 杠杆
     initial_capital: float = 100.0            # 初始资金 (u)
-    entry_threshold: float = 0.65             # 入场阈值
+    entry_threshold: float = 0.50             # 入场阈值（v5回测确认）
 
     # === 风控参数 ===
     max_consecutive_stops: int = 3            # 连续止损暂停阈值

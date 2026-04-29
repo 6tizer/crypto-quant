@@ -77,6 +77,7 @@ class Trade(Base):
     exit_reason = Column(String(30), default="")
     opened_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime, nullable=True)
+    peak_pnl = Column(Float, default=0)  # P1-⑥: trailing stop 用
 
 
 class RiskState(Base):
@@ -90,6 +91,7 @@ class RiskState(Base):
     is_paused = Column(Boolean, default=False)
     pause_reason = Column(String(200), default="")
     pause_until = Column(DateTime, nullable=True)
+    peak_equity = Column(Float, default=0)  # P1-⑦: peak-to-trough 回撤用
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 

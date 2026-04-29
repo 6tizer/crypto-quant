@@ -138,8 +138,9 @@ def record_stop_loss(
         # 检查总回撤
         equity = _get_equity(exchange)
         if equity > 0:
-            drawdown = _calc_drawdown(equity)
-            state.total_drawdown_pct = round(drawdown, 2)
+            drawdown, new_peak = _calc_drawdown(equity, state.peak_equity or 0)
+            state.total_drawdown_pct = drawdown
+            state.peak_equity = new_peak  # P1-⑦
 
         state.updated_at = datetime.now(timezone.utc)
         session.commit()
@@ -210,9 +211,10 @@ def update_drawdown(
         if equity <= 0:
             return 0.0
 
-        drawdown = _calc_drawdown(equity)
+        drawdown, new_peak = _calc_drawdown(equity, state.peak_equity or 0)
         state = _get_or_create_state(session)
         state.total_drawdown_pct = round(drawdown, 2)
+        state.peak_equity = new_peak  # P1-⑦
         state.updated_at = datetime.now(timezone.utc)
         session.commit()
 
@@ -244,6 +246,7 @@ def _get_or_create_state(session: DBSession) -> RiskState:
             is_paused=False,
             pause_reason="",
             pause_until=None,
+            peak_equity=0.0,  # P1-⑦
             updated_at=datetime.now(timezone.utc),
         )
         session.add(state)
@@ -275,18 +278,18 @@ def _get_daily_loss_limit(equity: float) -> float:
     return round(equity * settings.daily_loss_limit_pct, 2)  # 50%
 
 
-def _calc_drawdown(equity: float) -> float:
-    """计算从初始资金起的回撤百分比。
+def _calc_drawdown(equity: float, peak_equity: float = 0) -> tuple[float, float]:
+    """P1-⑦: peak-to-trough 回撤。
 
-    简单实现：(初始资金 - 当前权益) / 初始资金 × 100
-    后续可优化为历史最高点回撤 (peak-to-trough)。
+    Returns:
+        (drawdown_pct, new_peak_equity)
     """
-    initial = settings.initial_capital
-    if initial <= 0:
-        return 0.0
-    if equity >= initial:
-        return 0.0
-    return round((initial - equity) / initial * 100, 2)
+    if equity > peak_equity:
+        return 0.0, equity
+    if peak_equity <= 0:
+        return 0.0, max(equity, peak_equity)
+    drawdown = (peak_equity - equity) / peak_equity * 100
+    return round(drawdown, 2), peak_equity
 
 
 def _get_latest_fear_greed(session: DBSession) -> int | None:
