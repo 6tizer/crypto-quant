@@ -73,6 +73,10 @@ def score_all_symbols() -> list[dict]:
     momentum_results = compute_all_signals()
     whitelist_results = get_whitelist_symbols()
 
+    # 排除非加密货币（黄金/白银/原油/股票锚定币等）
+    EXCLUDE_SYMBOLS = {"XAU/USDT", "XAG/USDT", "PAXG/USDT", "CL/USDT", "TSLA/USDT"}
+    momentum_results = [m for m in momentum_results if m["symbol"] not in EXCLUDE_SYMBOLS]
+
     # 构建 whitelist 查找表
     wl_map = {r["symbol"]: r["whitelist_score"] for r in whitelist_results}
 

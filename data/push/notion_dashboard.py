@@ -166,14 +166,23 @@ def push_daily_market():
         triggered = session.query(SignalScore).filter(SignalScore.captured_at == subq.c.max_ts, SignalScore.score_total > 0.3).count()
 
         fg_value = fg.value if fg else 0
-        fg_class = fg.classification if fg else "N/A"
+        fg_class_raw = fg.classification if fg else "Neutral"
+        # 映射为中文（匹配 Notion DB 的 select options）
+        fg_class_map = {
+            "Extreme Fear": "极度恐惧",
+            "Fear": "恐惧",
+            "Neutral": "中性",
+            "Greed": "贪婪",
+            "Extreme Greed": "极度贪婪",
+        }
+        fg_class = fg_class_map.get(fg_class_raw, fg_class_raw)
         btc_vol = (btc.volatility_20d * 100) if btc else 0
         ratio = sw.get("ratio", 0)
         mode = "已暂停" if sw.get("paused") else ("策略A（追高）" if sw.get("weight_a", 0) > 0.5 else "策略B（多因子）")
         top1_sym = top1.symbol.replace("/", "-") if top1 else "N/A"
         top1_score = top1.score_total if top1 else 0
 
-        _archive_old_rows(DS_DAILY_MARKET, keep=1)
+        _archive_old_rows(DS_DAILY_MARKET, keep=0)
 
         _notion_post(
             "https://api.notion.com/v1/pages",
