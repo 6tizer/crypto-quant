@@ -82,7 +82,7 @@ def place_market_long(
             raise RuntimeError(f"风控未通过: {reason}")
 
         # ========== 3. 检查最大持仓数 ==========
-        if not can_open_new_position(exchange, max_positions=settings.top_symbols_count if False else 5):
+        if not can_open_new_position(exchange, max_positions=settings.max_positions):
             raise RuntimeError("已达最大持仓数上限")
 
         # ========== 4. 获取当前价格 и 账户权益 ==========

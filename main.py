@@ -242,7 +242,7 @@ def main() -> None:
     scheduler.add_job(
         run_trading_cycle,
         "interval",
-        seconds=300,
+        seconds=settings.trading_cycle_interval,
         id="trading_cycle",
         name="交易循环",
     )

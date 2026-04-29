@@ -21,12 +21,15 @@ from utils.symbol import to_db_symbol, to_exchange_symbol
 log = structlog.get_logger()
 
 
-# P1-⑥: 新止盈阶梯
-TP_HALF_AND_BREAKEVEN = 1.5   # 1.5x 平半 + 保本止损
-TP_SELL_75PCT = 3.0           # 3x 平剩余 75%
-TP_CLEAR = 5.0                # 5x 清仓
-FORCE_CLOSE_HOURS = 48
-TRAILING_DRAWDOWN = 0.4       # 从峰值回撤 40% 触发 trailing stop
+def _get_tp_constants() -> tuple[float, float, float, int, float]:
+    """从 settings 获取止盈参数，避免模块级硬编码。"""
+    return (
+        settings.tp_half_breakeven_multiple,
+        settings.tp_sell_75pct_multiple,
+        settings.tp_clear_multiple,
+        settings.force_close_hours,
+        settings.trailing_drawdown,
+    )
 
 
 def poll_positions(
@@ -170,6 +173,8 @@ def _evaluate_tp_rules(
     if entry_price <= 0 or mark_price <= 0:
         return None
 
+    tp_half, tp_75, tp_clear, force_hrs, trailing_dd = _get_tp_constants()
+
     # 计算盈亏比（相对于开仓时 risk_amount）
     risk_amount = trade.risk_amount if trade and trade.risk_amount > 0 else (
         get_account_balance(exchange) * settings.risk_per_trade)
@@ -178,20 +183,20 @@ def _evaluate_tp_rules(
     peak_pnl = trade.peak_pnl if trade else 0
 
     # 1. 48h 强制平仓（最高优先级）
-    if position_age_hours >= FORCE_CLOSE_HOURS:
+    if position_age_hours >= force_hrs:
         try:
             _force_close_position(exchange, symbol)
             _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="48h强制平仓")
             return {
                 "symbol": symbol,
                 "action": "force_close",
-                "detail": f"持仓 {position_age_hours:.1f}h >= {FORCE_CLOSE_HOURS}h，强制平仓",
+                "detail": f"持仓 {position_age_hours:.1f}h >= {force_hrs}h，强制平仓",
             }
         except Exception as e:
             return {"symbol": symbol, "action": "force_close_error", "detail": f"强制平仓失败: {e}"}
 
     # 2. P1-⑥: 5x 清仓
-    if profit_multiple >= TP_CLEAR:
+    if profit_multiple >= tp_clear:
         try:
             _force_close_position(exchange, symbol)
             _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="止盈5x清仓")
@@ -204,7 +209,7 @@ def _evaluate_tp_rules(
             return {"symbol": symbol, "action": "clear_error", "detail": f"清仓失败: {e}"}
 
     # 3. P1-⑥: 3x 平剩余 75%（去重：检查 closed_3x）
-    if profit_multiple >= TP_SELL_75PCT and not (trade and trade.closed_3x):
+    if profit_multiple >= tp_75 and not (trade and trade.closed_3x):
         try:
             _partial_close(exchange, symbol, ratio=0.75)
             if trade and session:
@@ -220,7 +225,7 @@ def _evaluate_tp_rules(
             return {"symbol": symbol, "action": "sell_75pct_error", "detail": f"平75%失败: {e}"}
 
     # 4. P1-⑥: 1.5x 平半 + 保本止损（去重：检查 half_closed）
-    if profit_multiple >= TP_HALF_AND_BREAKEVEN and not (trade and trade.half_closed):
+    if profit_multiple >= tp_half and not (trade and trade.half_closed):
         try:
             _partial_close(exchange, symbol, ratio=0.5)
             if trade and session:
@@ -236,16 +241,16 @@ def _evaluate_tp_rules(
             return {"symbol": symbol, "action": "half_close_error", "detail": f"平半失败: {e}"}
 
     # 5. P1-⑥: Trailing stop — 1.5x 后启动，峰值回撤 40% 平仓
-    if profit_multiple >= TP_HALF_AND_BREAKEVEN and peak_pnl > 0:
+    if profit_multiple >= tp_half and peak_pnl > 0:
         drawdown_from_peak = (peak_pnl - unrealized_pnl) / peak_pnl if peak_pnl > 0 else 0
-        if drawdown_from_peak >= TRAILING_DRAWDOWN:
+        if drawdown_from_peak >= trailing_dd:
             try:
                 _force_close_position(exchange, symbol)
                 _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="trailing_stop")
                 return {
                     "symbol": symbol,
                     "action": "trailing_stop",
-                    "detail": f"峰值 {peak_pnl:.2f}u 回撤 {drawdown_from_peak*100:.0f}% >= {TRAILING_DRAWDOWN*100:.0f}%，trailing平仓",
+                    "detail": f"峰值 {peak_pnl:.2f}u 回撤 {drawdown_from_peak*100:.0f}% >= {trailing_dd*100:.0f}%，trailing平仓",
                 }
             except Exception as e:
                 return {"symbol": symbol, "action": "trailing_error", "detail": f"trailing失败: {e}"}

@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     max_positions: int = 5                    # 同时最大持仓数
     risk_per_trade: float = 0.02                # 单笔风险占 equity 的比例
 
+    # === 止盈阶梯参数 ===
+    tp_half_breakeven_multiple: float = 1.5   # 1.5x 平半 + 保本止损
+    tp_sell_75pct_multiple: float = 3.0       # 3x 平剩余 75%
+    tp_clear_multiple: float = 5.0            # 5x 清仓
+    force_close_hours: int = 48               # 持仓超时强制平仓 (h)
+    trailing_drawdown: float = 0.4            # 峰值回撤触发 trailing stop (40%)
+
+    # === 调度间隔 ===
+    trading_cycle_interval: int = 300         # 交易循环间隔 (s)
+
     # === 风控参数 ===
     max_consecutive_stops: int = 3            # 连续止损暂停阈值
     max_drawdown_pct: float = 30.0            # 总回撤暂停线 %
