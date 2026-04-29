@@ -183,7 +183,10 @@ def main() -> None:
     # 优雅关闭
     def shutdown(signum, frame):
         log.info("shutdown_signal", signal=signum)
-        scheduler.shutdown(wait=False)
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
         log.info("crypto_quant_stopped")
         sys.exit(0)
 
@@ -198,7 +201,10 @@ def main() -> None:
     try:
         signal.pause()
     except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown(wait=False)
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
