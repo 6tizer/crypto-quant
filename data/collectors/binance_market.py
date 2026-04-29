@@ -19,6 +19,7 @@ def get_exchange() -> ccxt.binanceusdm:
         "enableRateLimit": True,
         "proxies": settings.proxies,
         "options": {"defaultType": "future"},
+        "timeout": 30000,  # 30s 超时，防止 OI 请求挂起
     })
 
 
