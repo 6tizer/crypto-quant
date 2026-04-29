@@ -79,9 +79,9 @@ def _get_balance_from_db() -> float:
     session = get_session(settings.database_url)
     try:
         trades = session.query(Trade).filter(
-            Trade.exit_time.isnot(None)
+            Trade.closed_at.isnot(None)
         ).all()
-        total_pnl = sum((t.exit_price - t.entry_price) * t.quantity * t.leverage for t in trades if t.exit_price and t.entry_price)
+        total_pnl = sum(t.pnl for t in trades)
         return settings.initial_capital + total_pnl
     except Exception:
         return settings.initial_capital

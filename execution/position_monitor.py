@@ -108,13 +108,9 @@ def _evaluate_tp_rules(
     if entry_price <= 0 or mark_price <= 0:
         return None
 
-    # 计算盈亏比（相对于 ATR 止损距离）
-    equity = get_account_balance(exchange)
-    # 用 ATR 止损额（2×ATR）做基准。无法实时获取 ATR 时，用 entry_price 估算
-    # stop_distance_pct = 2×ATR/entry_price ≈ 0.01~0.10（根据不同币种）
-    # 用固定 5% 作为 fallback
-    stop_distance_pct = 0.05  # fallback ATR估算
-    risk_amount = equity * settings.risk_per_trade
+    # 计算盈亏比（相对于开仓时 risk_amount）
+    risk_amount = trade.risk_amount if trade and trade.risk_amount > 0 else (
+        get_account_balance(exchange) * settings.risk_per_trade)
     profit_multiple = unrealized_pnl / risk_amount if risk_amount > 0 else 0
 
     peak_pnl = trade.peak_pnl if trade else 0
@@ -143,10 +139,13 @@ def _evaluate_tp_rules(
         except Exception as e:
             return {"symbol": symbol, "action": "clear_error", "detail": f"清仓失败: {e}"}
 
-    # 3. P1-⑥: 3x 平剩余 75%
-    if profit_multiple >= TP_SELL_75PCT:
+    # 3. P1-⑥: 3x 平剩余 75%（去重：检查 closed_3x）
+    if profit_multiple >= TP_SELL_75PCT and not (trade and trade.closed_3x):
         try:
             _partial_close(exchange, symbol, ratio=0.75)
+            if trade:
+                trade.closed_3x = True
+                session.commit()
             _update_stop_loss(exchange, symbol, entry_price * 1.001)  # 保本
             return {
                 "symbol": symbol,
@@ -156,10 +155,13 @@ def _evaluate_tp_rules(
         except Exception as e:
             return {"symbol": symbol, "action": "sell_75pct_error", "detail": f"平75%失败: {e}"}
 
-    # 4. P1-⑥: 1.5x 平半 + 保本止损
-    if profit_multiple >= TP_HALF_AND_BREAKEVEN:
+    # 4. P1-⑥: 1.5x 平半 + 保本止损（去重：检查 half_closed）
+    if profit_multiple >= TP_HALF_AND_BREAKEVEN and not (trade and trade.half_closed):
         try:
             _partial_close(exchange, symbol, ratio=0.5)
+            if trade:
+                trade.half_closed = True
+                session.commit()
             _update_stop_loss(exchange, symbol, entry_price)  # 保本
             return {
                 "symbol": symbol,

@@ -78,6 +78,9 @@ class Trade(Base):
     opened_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime, nullable=True)
     peak_pnl = Column(Float, default=0)  # P1-⑥: trailing stop 用
+    half_closed = Column(Boolean, default=False)   # 1.5x 已平半
+    closed_3x = Column(Boolean, default=False)     # 3x 已平 75%
+    risk_amount = Column(Float, default=0)         # 开仓时的风险金额
 
 
 class RiskState(Base):

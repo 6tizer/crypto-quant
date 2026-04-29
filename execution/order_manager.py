@@ -168,6 +168,7 @@ def place_market_long(
             pnl_pct=0,
             strategy=strategy_type,
             signal_score_id=signal_score_id or 0,
+            risk_amount=size_result.risk_amount,
             entry_reason=f"市价开多: 信号ID={signal_score_id}, 杠杆={size_result.leverage}x",
             opened_at=datetime.now(timezone.utc),
         )

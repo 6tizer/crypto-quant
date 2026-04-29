@@ -213,8 +213,8 @@ def update_drawdown(
         if equity <= 0:
             return 0.0
 
-        drawdown, new_peak = _calc_drawdown(equity, state.peak_equity or 0)
         state = _get_or_create_state(session)
+        drawdown, new_peak = _calc_drawdown(equity, state.peak_equity or 0)
         state.total_drawdown_pct = round(drawdown, 2)
         state.peak_equity = new_peak  # P1-⑦
         state.updated_at = datetime.now(timezone.utc)
