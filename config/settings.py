@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     top_symbols_count: int = 50
 
     # === 交易参数（阶段 3 使用，提前定义） ===
-    stop_loss_amount: float = 200.0           # 固定止损金额 (u)
+    stop_loss_amount: float = 200.0           # 固定止损金额 (u) — 大资金后期用
+    stop_loss_pct: float = 0.20               # 早期止损 = 账户净值×20%
+    daily_loss_limit: float = 500.0           # 固定日亏上限 (u) — 大资金后期用
+    daily_loss_limit_pct: float = 0.50        # 早期日亏上限 = 账户净值×50%
+    risk_mode_threshold: float = 1000.0       # 净值 > 此值时切固定金额模式
     leverage_strategy_a: int = 5              # 策略 A 杠杆
     leverage_strategy_b: int = 3              # 策略 B 杠杆
     initial_capital: float = 100.0            # 初始资金 (u)
@@ -34,7 +38,6 @@ class Settings(BaseSettings):
 
     # === 风控参数 ===
     max_consecutive_stops: int = 3            # 连续止损暂停阈值
-    daily_loss_limit: float = 500.0           # 单日亏损上限 (u)
     max_drawdown_pct: float = 30.0            # 总回撤暂停线 %
     fear_greed_pause_line: int = 15           # 恐贪暂停线
 

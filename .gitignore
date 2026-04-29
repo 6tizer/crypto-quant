@@ -8,6 +8,7 @@ __pycache__/
 # Data & Secrets
 data/*.db
 data/*.db-journal
+data/backtest/
 .env
 config/.env
 
