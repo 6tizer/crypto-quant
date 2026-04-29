@@ -25,7 +25,11 @@ class PositionSizeResult:
 
 
 def _build_exchange(api_key: str = "", secret: str = "") -> ccxt.binanceusdm:
-    """构建交易所实例。"""
+    """构建交易所实例。Demo 模式自动启用 enable_demo_trading。
+    
+    Demo Trading 已知限制：binanceusdm v2/v3 账户端点返回 -1109，
+    需使用 v1 端点。余额通过 positions + usdt_balance 自算。
+    """
     params = {
         "enableRateLimit": True,
         "proxies": settings.proxies,
@@ -36,7 +40,13 @@ def _build_exchange(api_key: str = "", secret: str = "") -> ccxt.binanceusdm:
         params["apiKey"] = api_key
     if secret:
         params["secret"] = secret
-    return ccxt.binanceusdm(params)
+    
+    ex = ccxt.binanceusdm(params)
+    
+    if settings.binance_demo_trading and api_key and secret:
+        ex.enable_demo_trading(True)
+    
+    return ex
 
 
 def get_exchange() -> ccxt.binanceusdm:
@@ -51,12 +61,32 @@ def get_trading_exchange() -> ccxt.binanceusdm:
 
 
 def get_account_balance(exchange: ccxt.binanceusdm) -> float:
+    """获取账户余额。Demo 模式从 DB 自算（API 不可用）。"""
+    if settings.binance_demo_trading:
+        return _get_balance_from_db()
+    
     try:
         balance = exchange.fetch_balance()
         return float(balance.get("USDT", {}).get("total", 0))
     except Exception as e:
         log.error("fetch_balance_failed", error=str(e))
-        return 0.0
+        return _get_balance_from_db()
+
+
+def _get_balance_from_db() -> float:
+    """从 trades 表自算当前余额（Demo 模式 fallback）。"""
+    from data.db.models import Trade, get_session
+    session = get_session(settings.database_url)
+    try:
+        trades = session.query(Trade).filter(
+            Trade.exit_time.isnot(None)
+        ).all()
+        total_pnl = sum((t.exit_price - t.entry_price) * t.quantity * t.leverage for t in trades if t.exit_price and t.entry_price)
+        return settings.initial_capital + total_pnl
+    except Exception:
+        return settings.initial_capital
+    finally:
+        session.close()
 
 
 def get_stop_loss_amount(equity: float) -> float:

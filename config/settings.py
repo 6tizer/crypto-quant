@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     # 币安 API
     binance_api_key: str = ""
     binance_api_secret: str = ""
-    binance_testnet: bool = True
+    binance_demo_trading: bool = True
     binance_proxy_host: str = "127.0.0.1"
     binance_proxy_port: int = 7897
 
