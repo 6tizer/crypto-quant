@@ -124,15 +124,30 @@ def calculate_position_size(
     size_pct = settings.risk_per_trade * entry_price / (stop_loss_distance * leverage)
     size_pct = min(size_pct, 1.0)
     position_value = equity * size_pct
+    # 币安合约最低名义金额 5 USDT
+    MIN_NOTIONAL = 5.0
+    if position_value < MIN_NOTIONAL:
+        log.info("bumping_to_min_notional", original=round(position_value, 2), min=MIN_NOTIONAL)
+        position_value = MIN_NOTIONAL
+        size_pct = position_value / equity
     risk_amount = position_value * (stop_loss_distance / entry_price) * leverage
 
     quantity = position_value / entry_price
     try:
         market = exchange.market(symbol)
         qty_precision = market.get("precision", {}).get("amount", 8)
-        quantity = _round_to_precision(quantity, qty_precision)
         min_amount = market.get("limits", {}).get("amount", {}).get("min", 0)
-        if quantity < min_amount:
+        min_cost = market.get("limits", {}).get("cost", {}).get("min", 0)
+        # 先算最低数量（满足 min_cost 和 min_notional，加 10% buffer 防价格波动）
+        effective_min = max(MIN_NOTIONAL, min_cost or 0) * 1.10
+        min_qty_for_cost = effective_min / entry_price if entry_price > 0 else 0
+        quantity = max(quantity, min_qty_for_cost, min_amount or 0)
+        quantity = _round_to_precision(quantity, qty_precision)
+        # 舍入后如果金额不够，向上补一步
+        step = 10 ** (-qty_precision) if qty_precision > 0 else 1.0
+        while quantity * entry_price < effective_min / 1.10 and quantity < 1e12:
+            quantity = _round_to_precision(quantity + step, qty_precision)
+        if quantity < (min_amount or 0):
             log.warning("quantity_below_min", symbol=symbol, quantity=quantity, min=min_amount)
             return None
     except Exception as e:
@@ -175,13 +190,19 @@ def can_open_new_position(exchange: ccxt.binanceusdm, max_positions: int = 5) ->
     return True
 
 
-def _round_to_precision(value: float, precision: int) -> float:
+def _round_to_precision(value: float, precision) -> float:
+    precision = int(precision)
     factor = 10 ** precision
     return int(value * factor) / factor
 
 
 def _get_price_precision(exchange: ccxt.binanceusdm, symbol: str) -> int:
     try:
-        return exchange.market(symbol).get("precision", {}).get("price", 2)
+        raw = exchange.market(symbol).get("precision", {}).get("price", 2)
+        # 如果是步长格式（如 1e-05），转换为小数位数
+        if isinstance(raw, float) and raw < 1:
+            import math
+            return int(round(-math.log10(raw)))
+        return int(raw)
     except Exception:
         return 2

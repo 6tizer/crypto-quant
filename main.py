@@ -101,6 +101,89 @@ def run_push_system_status() -> None:
         log.error("push_system_status_error", error=str(e))
 
 
+def run_trading_cycle() -> None:
+    """交易循环：检查信号 → 开仓 → 检查持仓止损/止盈。"""
+    log.info("trading_cycle_start")
+    try:
+        from execution.order_manager import place_market_long, get_top_signals
+        from execution.portfolio import get_trading_exchange
+        from execution.position_monitor import poll_positions
+        from execution.risk_guard import check_risk_status
+        from data.db.models import Trade, get_session
+        from sqlalchemy import func as sa_func
+
+        session = get_session(settings.database_url)
+        try:
+            # 1. 风控检查
+            risk_ok, risk_reason = check_risk_status(session=session)
+            if not risk_ok:
+                log.info("trading_blocked_by_risk", reason=risk_reason)
+                return
+
+            # 2. 检查现有持仓止损/止盈
+            try:
+                poll_positions(session=session)
+            except Exception as e:
+                log.error("poll_positions_error", error=str(e))
+
+            # 3. 检查当前持仓数量
+            open_count = session.query(sa_func.count(Trade.id)).filter(
+                Trade.closed_at.is_(None)
+            ).scalar() or 0
+
+            if open_count >= settings.max_positions:
+                log.info("max_positions_reached", count=open_count)
+                return
+
+            # 4. 获取 Top 信号
+            slots = settings.max_positions - open_count
+            signals = get_top_signals(limit=slots, session=session)
+
+            if not signals:
+                log.info("no_signals_above_threshold")
+                return
+
+            # 5. 逐个开仓
+            from data.db.models import MarketSnapshot
+            from sqlalchemy import desc as _desc
+            exchange = get_trading_exchange()
+            exchange.load_markets()
+            futures_symbols = set(exchange.markets.keys())
+            for sig in signals:
+                try:
+                    # 过滤非合约币种（如股票代币 INTC）
+                    sym = sig["symbol"]
+                    if sym not in futures_symbols:
+                        # 尝试加 :USDT 后缀
+                        if f"{sym}:USDT" not in futures_symbols:
+                            log.info("skip_not_futures", symbol=sym)
+                            continue
+                    # 获取 ATR（用 volatility × price 作为近似）
+                    snap = session.query(MarketSnapshot).filter(
+                        MarketSnapshot.symbol == sym
+                    ).order_by(_desc(MarketSnapshot.captured_at)).first()
+                    atr = (snap.volatility_20d * snap.price) if snap and snap.volatility_20d > 0 else 0
+                    if atr <= 0:
+                        log.warning("skip_no_atr", symbol=sym)
+                        continue
+                    place_market_long(
+                        symbol=sym,
+                        signal_score_id=sig.get("id"),
+                        session=session,
+                        atr=atr,
+                    )
+                    log.info("trade_opened", symbol=sym, score=sig.get("score_total"))
+                except Exception as e:
+                    log.error("trade_open_failed", symbol=sig["symbol"], error=str(e))
+
+        finally:
+            session.close()
+
+    except Exception as e:
+        log.error("trading_cycle_error", error=str(e))
+    log.info("trading_cycle_done")
+
+
 def main() -> None:
     setup_logging()
     log.info("crypto_quant_starting", settings={
@@ -218,64 +301,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def run_trading_cycle() -> None:
-    """交易循环：检查信号 → 开仓 → 检查持仓止损/止盈。"""
-    log.info("trading_cycle_start")
-    try:
-        from execution.order_manager import place_market_long, get_top_signals
-        from execution.position_monitor import poll_positions
-        from execution.risk_guard import check_risk_status
-        from data.db.models import Trade, get_session
-        from sqlalchemy import func as sa_func
-
-        session = get_session(settings.database_url)
-        try:
-            # 1. 风控检查
-            risk = check_risk_status(session=session)
-            if risk.get("blocked"):
-                log.info("trading_blocked_by_risk", reason=risk.get("reason"))
-                return
-
-            # 2. 检查现有持仓止损/止盈
-            try:
-                poll_positions(session=session)
-            except Exception as e:
-                log.error("poll_positions_error", error=str(e))
-
-            # 3. 检查当前持仓数量
-            open_count = session.query(sa_func.count(Trade.id)).filter(
-                Trade.status == "open"
-            ).scalar() or 0
-
-            if open_count >= settings.max_positions:
-                log.info("max_positions_reached", count=open_count)
-                return
-
-            # 4. 获取 Top 信号
-            slots = settings.max_positions - open_count
-            signals = get_top_signals(limit=slots, session=session)
-
-            if not signals:
-                log.info("no_signals_above_threshold")
-                return
-
-            # 5. 逐个开仓
-            for sig in signals:
-                try:
-                    place_market_long(
-                        symbol=sig["symbol"],
-                        signal_score_id=sig.get("signal_score_id"),
-                        session=session,
-                    )
-                    log.info("trade_opened", symbol=sig["symbol"], score=sig.get("score"))
-                except Exception as e:
-                    log.error("trade_open_failed", symbol=sig["symbol"], error=str(e))
-
-        finally:
-            session.close()
-
-    except Exception as e:
-        log.error("trading_cycle_error", error=str(e))
-    log.info("trading_cycle_done")
