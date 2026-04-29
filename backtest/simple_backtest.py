@@ -1,6 +1,13 @@
-"""回测引擎 v3 — ATR 自适应仓位 + Trailing Stop + 权重归一化评分"""
+"""回测引擎 v4 — 修复4个P0 Bug + 真正组合级模拟
+
+Bug①  _apply_pnl 用入场 capital
+Bug②  1.5x 平仓用 remaining × 50%
+Bug③  归一化评分 momentum×0.54 + oi×0.31 + whitelist×0.15
+Bug④  组合级模拟 — 所有币共享资金池
+"""
 
 from datetime import timedelta
+from dataclasses import dataclass
 
 import pandas as pd
 import structlog
@@ -11,316 +18,260 @@ log = structlog.get_logger()
 
 
 def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """计算 ATR (Average True Range)。"""
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
+    high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
-
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
 
-def simulate_strategy_a(
-    df: pd.DataFrame,
-    entry_threshold: float = 0.65,
-    initial_capital: float = 100.0,
-    taker_fee_rate: float = 0.0004,
-    risk_per_trade: float = 0.02,
-    slippage_rate: float = 0.001,
-) -> dict:
-    """策略 A 回测（v3）。
-
-    改进：
-    - 止损 = 2 × ATR(14)，每个币独立
-    - 仓位 = 账户净值 × risk_per_trade / (止损距离 × 杠杆)
-    - 止盈：1.5x 平半 + trailing → 3x 平剩余 75% → 5x 清仓 → 48h 兜底
-    - Trailing stop：从最高盈利回撤 40% 就平
-    - 手续费 + 滑点
-    - 所有部分平仓合并为单笔 round-trip 统计
-    """
-    if len(df) < 200:
-        return {"trades": 0}
-
+def _compute_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Bug③: 归一化评分。"""
     df = df.copy()
     df["return"] = df["close"].pct_change()
     df["vol_20d"] = df["return"].rolling(20 * 288).std()
     df["change_pct"] = df["return"] * 100
     df["atr"] = _compute_atr(df, period=14)
 
-    # 入场信号
-    momentum_threshold = settings.momentum_threshold
-    df["signal"] = 0.0
+    mt = settings.momentum_threshold
     mask = df["vol_20d"] > 0
-    df.loc[mask, "signal"] = (
-        (df.loc[mask, "change_pct"].abs() / 100 > momentum_threshold * df.loc[mask, "vol_20d"]).astype(float)
-    )
+    momentum = pd.Series(0.0, index=df.index)
+    if mask.any():
+        triggered = df["change_pct"].abs() / 100 > mt * df["vol_20d"]
+        if triggered.any():
+            intensity = df.loc[triggered, "change_pct"].abs() / 100 / (mt * df.loc[triggered, "vol_20d"])
+            momentum.loc[triggered] = 0.3 + 0.7 * (intensity.clip(upper=3.0) / 3.0)
 
-    # 连续评分：signal 触发时 score = 0.3 + 0.7 * (强度 / 3倍波动率)
-    df["score"] = 0.0
-    triggered = df["signal"] > 0
-    if triggered.any():
-        intensity = df.loc[triggered, "change_pct"].abs() / 100 / (momentum_threshold * df.loc[triggered, "vol_20d"])
-        df.loc[triggered, "score"] = 0.3 + 0.7 * (intensity.clip(upper=3.0) / 3.0)
+    oi = pd.Series(0.0, index=df.index)
+    if "open_interest" in df.columns and df["open_interest"].notna().any():
+        oi_filled = df["open_interest"].ffill()
+        div = df["close"].pct_change(12) * (-oi_filled.pct_change(12))
+        oi = div.clip(lower=0, upper=1).fillna(0)
 
-    lev = settings.leverage_strategy_a
-    capital = initial_capital
-    peak_capital = capital
-    max_drawdown = 0.0
+    wl = pd.Series(0.0, index=df.index)
+    dv = df["return"].rolling(288).std() * 288**0.5
+    if (dv > 0.3).any():
+        wl[dv > 0.3] = 0.5
 
-    # 每个 round-trip 记录
-    round_trips = []
-    # 当前持仓的部分平仓累计
-    position = None
-
-    def _calc_position_size(stop_distance):
-        """ATR 自适应仓位：每笔最大亏损 = capital × risk_per_trade。"""
-        if stop_distance <= 0 or capital <= 0:
-            return 0
-        size = capital * risk_per_trade / (stop_distance * lev)
-        return min(size, 1.0)
-
-    def _apply_pnl(pnl_pct, size_pct):
-        """计算单次部分平仓的净盈亏（含手续费+滑点）。"""
-        position_value = capital * size_pct
-        gross_pnl = position_value * pnl_pct * lev
-        slip = position_value * slippage_rate * lev
-        fee = position_value * taker_fee_rate * lev * 2
-        return gross_pnl - slip - fee
-
-    for idx, row in df.iterrows():
-        ts = row["timestamp"]
-        price = row["close"]
-        atr = row.get("atr", 0)
-
-        if position:
-            stop_distance = position["stop_loss_distance"]
-
-            # 检查止损（用止损价而非收盘价，避免跳空超亏）
-            if price <= position["stop_loss"]:
-                remaining = position.get("remaining_pct", 0)
-                exit_price = position["stop_loss"]  # 用止损价，不超亏
-                pnl_pct = (exit_price - position["entry_price"]) / position["entry_price"]
-                net = _apply_pnl(pnl_pct, remaining)
-                capital += net
-                position["accum_pnl"] += net
-                round_trips.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": exit_price,
-                    "pnl": position["accum_pnl"],
-                    "exit_reason": "stop_loss",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
-                position = None
-                continue
-
-            # 盈亏比
-            pnl_ratio = (price - position["entry_price"]) / stop_distance if stop_distance > 0 else 0
-
-            # 更新峰值盈利
-            if pnl_ratio > position.get("peak_pnl_ratio", 0):
-                position["peak_pnl_ratio"] = pnl_ratio
-
-            # 48h 兜底
-            if (ts - position["entry_time"]) > timedelta(hours=48):
-                remaining = position.get("remaining_pct", 0)
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                net = _apply_pnl(pnl_pct, remaining)
-                capital += net
-                position["accum_pnl"] += net
-                round_trips.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": price,
-                    "pnl": position["accum_pnl"],
-                    "exit_reason": "timeout_48h",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
-                position = None
-                continue
-
-            # 5x 清仓
-            if pnl_ratio >= 5:
-                remaining = position.get("remaining_pct", 0)
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                net = _apply_pnl(pnl_pct, remaining)
-                capital += net
-                position["accum_pnl"] += net
-                round_trips.append({
-                    "entry_time": position["entry_time"],
-                    "exit_time": ts,
-                    "entry_price": position["entry_price"],
-                    "exit_price": price,
-                    "pnl": position["accum_pnl"],
-                    "exit_reason": "take_profit_5x",
-                    "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                })
-                position = None
-                continue
-
-            # 3x 平剩余 75%
-            if pnl_ratio >= 3 and not position.get("closed_3x", False):
-                remaining = position.get("remaining_pct", 0)
-                close_pct = remaining * 0.75
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                net = _apply_pnl(pnl_pct, close_pct)
-                capital += net
-                position["accum_pnl"] += net
-                position["remaining_pct"] -= close_pct
-                position["closed_3x"] = True
-                position["stop_loss"] = position["entry_price"] * 1.001  # 保本
-
-            # 1.5x 平半 + 启动 trailing
-            if pnl_ratio >= 1.5 and not position.get("half_closed", False):
-                pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                net = _apply_pnl(pnl_pct, 0.5)
-                capital += net
-                position["accum_pnl"] += net
-                position["half_closed"] = True
-                position["remaining_pct"] = 0.5
-                position["stop_loss"] = position["entry_price"]  # 保本止损
-
-            # Trailing stop：从峰值回撤 40%
-            if position.get("half_closed", False) and position.get("peak_pnl_ratio", 0) > 1.5:
-                drawdown_from_peak = position["peak_pnl_ratio"] - pnl_ratio
-                if drawdown_from_peak >= position["peak_pnl_ratio"] * 0.4:
-                    remaining = position.get("remaining_pct", 0)
-                    pnl_pct = (price - position["entry_price"]) / position["entry_price"]
-                    net = _apply_pnl(pnl_pct, remaining)
-                    capital += net
-                    position["accum_pnl"] += net
-                    round_trips.append({
-                        "entry_time": position["entry_time"],
-                        "exit_time": ts,
-                        "entry_price": position["entry_price"],
-                        "exit_price": price,
-                        "pnl": position["accum_pnl"],
-                        "exit_reason": "trailing_stop",
-                        "hold_hours": (ts - position["entry_time"]).total_seconds() / 3600,
-                    })
-                    position = None
-                    continue
-
-        else:
-            # 开仓
-            score = row.get("score", 0)
-            if score >= entry_threshold and not pd.isna(score) and atr > 0:
-                stop_distance = 2 * atr
-                stop_loss = price - stop_distance
-                size_pct = _calc_position_size(stop_distance)
-                if size_pct > 0 and capital > 0:
-                    position = {
-                        "entry_price": price,
-                        "entry_time": ts,
-                        "stop_loss": stop_loss,
-                        "stop_loss_distance": stop_distance,
-                        "remaining_pct": size_pct,
-                        "accum_pnl": 0,
-                        "half_closed": False,
-                        "closed_3x": False,
-                        "peak_pnl_ratio": 0,
-                    }
-
-        # 更新回撤
-        if capital > peak_capital:
-            peak_capital = capital
-        if peak_capital > 0:
-            dd = (peak_capital - capital) / peak_capital
-            max_drawdown = max(max_drawdown, dd)
-
-    # 统计（基于 round-trip）
-    if not round_trips:
-        return {"trades": 0}
-
-    wins = [t for t in round_trips if t["pnl"] > 0]
-    losses = [t for t in round_trips if t["pnl"] <= 0]
-
-    return {
-        "trades": len(round_trips),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": len(wins) / len(round_trips) * 100,
-        "total_pnl": sum(t["pnl"] for t in round_trips),
-        "final_capital": capital,
-        "max_drawdown_pct": max_drawdown * 100,
-        "avg_hold_hours": sum(t["hold_hours"] for t in round_trips) / len(round_trips),
-        "trades_list": round_trips,
-        "exit_reasons": {
-            "stop_loss": sum(1 for t in round_trips if t["exit_reason"] == "stop_loss"),
-            "trailing_stop": sum(1 for t in round_trips if t["exit_reason"] == "trailing_stop"),
-            "timeout_48h": sum(1 for t in round_trips if t["exit_reason"] == "timeout_48h"),
-            "take_profit_5x": sum(1 for t in round_trips if t["exit_reason"] == "take_profit_5x"),
-        },
-    }
+    df["score"] = 0.54 * momentum + 0.31 * oi + 0.15 * wl
+    return df
 
 
-def run_backtest(thresholds: list[float] = None) -> pd.DataFrame:
-    """运行多阈值回测，每个阈值独立输出完整报告。"""
+@dataclass
+class Position:
+    symbol: str
+    entry_price: float
+    entry_time: pd.Timestamp
+    entry_capital: float
+    stop_loss: float
+    stop_loss_distance: float
+    remaining_pct: float
+    accum_pnl: float = 0.0
+    half_closed: bool = False
+    closed_3x: bool = False
+    peak_pnl_ratio: float = 0.0
+
+
+def run_backtest(
+    thresholds: list[float] = None,
+    initial_capital: float = 100.0,
+    risk_per_trade: float = 0.02,
+    taker_fee_rate: float = 0.0004,
+    slippage_rate: float = 0.001,
+    max_positions: int = 5,
+) -> pd.DataFrame:
+    """Bug④: 组合级模拟。只在有信号或有持仓的时间点遍历。"""
     from backtest.data_downloader import download_top_symbols
 
     if thresholds is None:
         thresholds = [round(0.30 + i * 0.05, 2) for i in range(8)]
 
     log.info("backtest_start", thresholds=thresholds)
-
-    data = download_top_symbols(top_n=30, days=90)
+    raw_data = download_top_symbols(top_n=30, days=90)
+    data = {sym: _compute_scores(df) for sym, df in raw_data.items()}
     log.info("data_loaded", symbols=len(data))
 
+    # 预处理：每个币转为 {timestamp: row_dict}，用 dict 加速查找
+    sym_data = {}
+    for sym, df in data.items():
+        rows = {}
+        for i, row in df.iterrows():
+            ts = row["timestamp"]
+            rows[ts] = {"close": row["close"], "atr": row.get("atr", 0), "score": row.get("score", 0)}
+        sym_data[sym] = rows
+
+    lev = settings.leverage_strategy_a
     results = []
+
     for threshold in thresholds:
-        agg = {
-            "total_trades": 0, "total_wins": 0, "total_losses": 0,
-            "total_pnl": 0,
-            "sum_win_pnl": 0, "sum_loss_pnl": 0,
-            "max_drawdown_pct": 0, "sum_hold_hours": 0,
-            "symbols_tested": 0,
-            "stop_loss": 0, "trailing": 0, "tp_5x": 0, "timeout": 0,
-        }
+        # 收集事件时间点：score >= threshold 的行 + 持仓需要监控的时间点
+        # 用集合去重
+        event_times = set()
+        signal_at = {}  # (ts, sym) -> row_data
+        for sym, rows in sym_data.items():
+            for ts, rd in rows.items():
+                if rd["score"] >= threshold:
+                    event_times.add(ts)
+                    signal_at[(ts, sym)] = rd
+                # 也加入相邻时间点用于持仓监控（简化：加入所有时间戳太慢）
+                # 实际上我们用所有时间戳但只遍历有持仓的币
 
-        for sym, df in data.items():
-            r = simulate_strategy_a(df, entry_threshold=threshold)
-            if r["trades"] > 0:
-                agg["total_trades"] += r["trades"]
-                agg["total_wins"] += r["wins"]
-                agg["total_losses"] += r["losses"]
-                agg["total_pnl"] += r["total_pnl"]
-                agg["sum_hold_hours"] += sum(t["hold_hours"] for t in r["trades_list"])
-                agg["max_drawdown_pct"] = max(agg["max_drawdown_pct"], r["max_drawdown_pct"])
-                agg["stop_loss"] += r["exit_reasons"]["stop_loss"]
-                agg["trailing"] += r["exit_reasons"]["trailing_stop"]
-                agg["tp_5x"] += r["exit_reasons"]["take_profit_5x"]
-                agg["timeout"] += r["exit_reasons"]["timeout_48h"]
-                agg["symbols_tested"] += 1
-                agg["sum_win_pnl"] += sum(t["pnl"] for t in r["trades_list"] if t["pnl"] > 0)
-                agg["sum_loss_pnl"] += sum(abs(t["pnl"]) for t in r["trades_list"] if t["pnl"] <= 0)
+        # 实际上需要所有时间戳来监控持仓退出
+        # 但只遍历有持仓的币 → 用时间戳索引
+        all_ts = sorted(set().union(*(set(r.keys()) for r in sym_data.values())))
 
-        total = agg["total_trades"]
-        wr = agg["total_wins"] / total * 100 if total > 0 else 0
-        avg_win = agg["sum_win_pnl"] / agg["total_wins"] if agg["total_wins"] > 0 else 0
-        avg_loss = agg["sum_loss_pnl"] / agg["total_losses"] if agg["total_losses"] > 0 else 0
-        profit_ratio = avg_win / avg_loss if avg_loss > 0 else float("inf")
-        avg_hold = agg["sum_hold_hours"] / total if total > 0 else 0
-        timeout_pct = agg["timeout"] / total * 100 if total > 0 else 0
+        capital = initial_capital
+        peak_capital = capital
+        max_drawdown = 0.0
+        positions: dict[str, Position] = {}
+        round_trips = []
+
+        def _apply_pnl(pnl_pct, size_pct, entry_cap):
+            pv = entry_cap * size_pct
+            return pv * pnl_pct * lev - pv * slippage_rate * lev - pv * taker_fee_rate * lev * 2
+
+        def _close(pos, ts, price, reason):
+            nonlocal capital
+            pnl_pct = (price - pos.entry_price) / pos.entry_price
+            net = _apply_pnl(pnl_pct, pos.remaining_pct, pos.entry_capital)
+            capital += net
+            capital = max(capital, 0)  # 不欠钱
+            pos.accum_pnl += net
+            round_trips.append({
+                "entry_time": pos.entry_time, "exit_time": ts,
+                "entry_price": pos.entry_price, "exit_price": price,
+                "pnl": pos.accum_pnl, "exit_reason": reason,
+                "hold_hours": (ts - pos.entry_time).total_seconds() / 3600,
+                "symbol": pos.symbol,
+            })
+
+        for ts in all_ts:
+            # 只遍历有持仓的 + 有信号的币
+            syms_to_check = set(positions.keys())
+            # 加入有信号的币
+            for sym in sym_data:
+                if (ts, sym) in signal_at:
+                    syms_to_check.add(sym)
+
+            for sym in syms_to_check:
+                rows = sym_data[sym]
+                if ts not in rows:
+                    continue
+                rd = rows[ts]
+                price = rd["close"]
+                atr = rd["atr"]
+
+                # ── 持仓处理 ──
+                if sym in positions:
+                    pos = positions[sym]
+                    stop_dist = pos.stop_loss_distance
+                    closed = False
+
+                    if price <= pos.stop_loss:
+                        _close(pos, ts, pos.stop_loss, "stop_loss")
+                        del positions[sym]
+                        closed = True
+
+                    if not closed:
+                        pnl_ratio = (price - pos.entry_price) / stop_dist if stop_dist > 0 else 0
+                        if pnl_ratio > pos.peak_pnl_ratio:
+                            pos.peak_pnl_ratio = pnl_ratio
+
+                        if (ts - pos.entry_time) > timedelta(hours=48):
+                            _close(pos, ts, price, "timeout_48h")
+                            del positions[sym]
+                            closed = True
+                        elif pnl_ratio >= 5:
+                            _close(pos, ts, price, "take_profit_5x")
+                            del positions[sym]
+                            closed = True
+
+                    if not closed and sym in positions:
+                        pos = positions[sym]
+                        stop_dist = pos.stop_loss_distance
+                        pnl_ratio = (price - pos.entry_price) / stop_dist if stop_dist > 0 else 0
+
+                        if pnl_ratio >= 3 and not pos.closed_3x:
+                            cp = pos.remaining_pct * 0.75
+                            net = _apply_pnl((price - pos.entry_price) / pos.entry_price, cp, pos.entry_capital)
+                            capital += net
+                            pos.accum_pnl += net
+                            pos.remaining_pct -= cp
+                            pos.closed_3x = True
+                            pos.stop_loss = pos.entry_price * 1.001
+
+                        pnl_ratio2 = (price - pos.entry_price) / stop_dist if stop_dist > 0 else 0
+                        if pnl_ratio2 >= 1.5 and not pos.half_closed:
+                            cp = pos.remaining_pct * 0.5
+                            net = _apply_pnl((price - pos.entry_price) / pos.entry_price, cp, pos.entry_capital)
+                            capital += net
+                            pos.accum_pnl += net
+                            pos.half_closed = True
+                            pos.remaining_pct -= cp
+                            pos.stop_loss = pos.entry_price
+
+                        if pos.half_closed and pos.peak_pnl_ratio > 1.5:
+                            dd = pos.peak_pnl_ratio - pnl_ratio2
+                            if dd >= pos.peak_pnl_ratio * 0.4:
+                                _close(pos, ts, price, "trailing_stop")
+                                del positions[sym]
+
+                # ── 开仓（限制同时持仓数 + 可用资金）──
+                if sym not in positions and len(positions) < max_positions:
+                    score = rd["score"]
+                    if score >= threshold and not pd.isna(score) and atr > 0:
+                        stop_dist = 2 * atr
+                        if stop_dist > 0 and capital > 0:
+                            # 可用资金 = 总资金 - 已占用资金（每个持仓的剩余百分比 × 入场资金）
+                            committed = sum(p.entry_capital * p.remaining_pct for p in positions.values())
+                            available = max(capital - committed, 0)
+                            if available < 1:  # 最低 1u 才开仓
+                                continue
+                            size_pct = min(available * risk_per_trade / (stop_dist * lev), 1.0)
+                            if size_pct > 0:
+                                positions[sym] = Position(
+                                    symbol=sym, entry_price=price, entry_time=ts,
+                                    entry_capital=available,  # 用可用资金，不是全部资金
+                                    stop_loss=price - stop_dist,
+                                    stop_loss_distance=stop_dist,
+                                    remaining_pct=size_pct,
+                                )
+
+            if capital > peak_capital:
+                peak_capital = capital
+            if peak_capital > 0:
+                max_drawdown = max(max_drawdown, (peak_capital - capital) / peak_capital)
+
+        for sym, pos in list(positions.items()):
+            _close(pos, all_ts[-1], pos.entry_price, "force_close")
+
+        # 统计
+        total = len(round_trips)
+        if total == 0:
+            results.append({"threshold": threshold, "trades": 0, "win_rate": 0,
+                            "profit_ratio": 0, "total_pnl": 0, "max_dd%": 0,
+                            "avg_hold_h": 0, "timeout%": 0,
+                            "stop_loss": 0, "trailing": 0, "tp_5x": 0, "timeout": 0})
+            continue
+
+        wins = [t for t in round_trips if t["pnl"] > 0]
+        losses = [t for t in round_trips if t["pnl"] <= 0]
+        wr = len(wins) / total * 100
+        aw = sum(t["pnl"] for t in wins) / len(wins) if wins else 0
+        al = sum(abs(t["pnl"]) for t in losses) / len(losses) if losses else 0
+        pr = aw / al if al > 0 else float("inf")
+        tc = sum(1 for t in round_trips if t["exit_reason"] == "timeout_48h")
 
         results.append({
-            "threshold": threshold,
-            "trades": total,
-            "win_rate": round(wr, 1),
-            "profit_ratio": round(profit_ratio, 2),
-            "total_pnl": round(agg["total_pnl"], 2),
-            "max_dd%": round(agg["max_drawdown_pct"], 1),
-            "avg_hold_h": round(avg_hold, 1),
-            "timeout%": round(timeout_pct, 1),
-            "stop_loss": agg["stop_loss"],
-            "trailing": agg["trailing"],
-            "tp_5x": agg["tp_5x"],
-            "timeout": agg["timeout"],
+            "threshold": threshold, "trades": total,
+            "win_rate": round(wr, 1), "profit_ratio": round(pr, 2),
+            "total_pnl": round(capital - initial_capital, 2),
+            "max_dd%": round(max_drawdown * 100, 1),
+            "avg_hold_h": round(sum(t["hold_hours"] for t in round_trips) / total, 1),
+            "timeout%": round(tc / total * 100, 1),
+            "stop_loss": sum(1 for t in round_trips if t["exit_reason"] == "stop_loss"),
+            "trailing": sum(1 for t in round_trips if t["exit_reason"] == "trailing_stop"),
+            "tp_5x": sum(1 for t in round_trips if t["exit_reason"] == "take_profit_5x"),
+            "timeout": tc,
         })
 
     return pd.DataFrame(results)
@@ -328,9 +279,9 @@ def run_backtest(thresholds: list[float] = None) -> pd.DataFrame:
 
 if __name__ == "__main__":
     report = run_backtest()
-    print("\n" + "=" * 110)
-    print("回测 v3 — ATR自适应仓位(2%风险) + Trailing Stop + 手续费(0.04%/边) + 滑点(0.1%)")
-    print("=" * 110)
+    print("\n" + "=" * 120)
+    print("回测 v4 — 真正组合级模拟 | Bug①②③④ | 归一化评分 | ATR仓位 | 手续费+滑点")
+    print("=" * 120)
     print(report.to_string(index=False))
     print()
 
