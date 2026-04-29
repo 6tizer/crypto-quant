@@ -48,9 +48,12 @@ def poll_positions(
     actions: list[dict[str, Any]] = []
 
     try:
-        # ======== 阶段 1: 止损检查 ========
-        # 从 DB 查所有未平仓 trade，比对交易所 mark_price 与 stop_loss_price
-        open_trades = session.query(Trade).filter(Trade.closed_at.is_(None)).all()
+        # ======== 阶段 1: 止损检查（仅 Demo 模式） ========
+        # Demo 环境条件单不可用，需 Python 端轮询止损
+        # 实盘环境使用交易所条件单，跳过轮询避免双重止损
+        open_trades = []
+        if settings.binance_demo_trading:
+            open_trades = session.query(Trade).filter(Trade.closed_at.is_(None)).all()
         if open_trades:
             tickers = exchange.fetch_tickers()
             for trade in open_trades:
@@ -90,8 +93,8 @@ def poll_positions(
                         try:
                             from notifications.tg import notify_trade_close
                             notify_trade_close(sym, pnl, "止损")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.warning("tg_stop_loss_notify_failed", symbol=sym, error=str(e))
                     except Exception as e:
                         log.error("stop_loss_execution_failed", symbol=sym, error=str(e))
 
@@ -178,6 +181,7 @@ def _evaluate_tp_rules(
     if position_age_hours >= FORCE_CLOSE_HOURS:
         try:
             _force_close_position(exchange, symbol)
+            _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="48h强制平仓")
             return {
                 "symbol": symbol,
                 "action": "force_close",
@@ -190,6 +194,7 @@ def _evaluate_tp_rules(
     if profit_multiple >= TP_CLEAR:
         try:
             _force_close_position(exchange, symbol)
+            _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="止盈5x清仓")
             return {
                 "symbol": symbol,
                 "action": "take_profit_5x",
@@ -236,6 +241,7 @@ def _evaluate_tp_rules(
         if drawdown_from_peak >= TRAILING_DRAWDOWN:
             try:
                 _force_close_position(exchange, symbol)
+                _close_trade_record(symbol, entry_price, mark_price, trade, session, reason="trailing_stop")
                 return {
                     "symbol": symbol,
                     "action": "trailing_stop",
@@ -333,6 +339,30 @@ def _cancel_stop_orders(exchange: ccxt.binanceusdm, symbol: str) -> None:
 # ============================================================
 
 
+def _close_trade_record(
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    trade: Trade | None,
+    session: DBSession | None,
+    reason: str = "止盈触发",
+) -> None:
+    """全仓平仓后调用 handle_take_profit 更新 DB + 重置连续止损计数。"""
+    try:
+        from execution.order_manager import handle_take_profit
+        pnl = (exit_price - entry_price) * (trade.quantity if trade else 0)
+        handle_take_profit(
+            symbol=symbol,
+            exit_price=exit_price,
+            pnl=pnl,
+            exit_reason=reason,
+            trade_id=trade.id if trade else None,
+            session=session,
+        )
+    except Exception as e:
+        log.error("close_trade_record_failed", symbol=symbol, reason=reason, error=str(e))
+
+
 def _get_trade_record(session: DBSession, symbol: str) -> Trade | None:
     """查找未平仓的 trade 记录。symbol 会自动转为 DB 格式。"""
     try:
@@ -343,7 +373,8 @@ def _get_trade_record(session: DBSession, symbol: str) -> Trade | None:
             .order_by(desc(Trade.opened_at))
             .first()
         )
-    except Exception:
+    except Exception as e:
+        log.warning("get_trade_record_failed", symbol=symbol, error=str(e))
         return None
 
 
@@ -356,8 +387,8 @@ def _get_actual_position_qty(exchange: ccxt.binanceusdm, symbol: str) -> float:
             sym = str(pos.get("symbol", ""))
             if to_db_symbol(sym) == to_db_symbol(symbol):
                 return abs(float(pos.get("contracts", 0) or 0))
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("get_actual_qty_failed", symbol=symbol, error=str(e))
     return 0.0
 
 

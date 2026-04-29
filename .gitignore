@@ -21,3 +21,4 @@ config/.env
 .DS_Store
 .handoffs/
 HANDOFF.md
+.gitnexus

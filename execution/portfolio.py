@@ -74,7 +74,10 @@ def get_account_balance(exchange: ccxt.binanceusdm) -> float:
 
 
 def _get_balance_from_db() -> float:
-    """从 trades 表自算当前余额（Demo 模式 fallback）。"""
+    """从 trades 表自算当前余额（Demo 模式 fallback）。
+
+    计算方式: 初始资金 + 已平仓PnL - 未平仓持仓保证金
+    """
     from data.db.models import Trade, get_session
     session = get_session(settings.database_url)
     try:
@@ -82,8 +85,20 @@ def _get_balance_from_db() -> float:
             Trade.closed_at.isnot(None)
         ).all()
         total_pnl = sum(t.pnl for t in trades)
-        return settings.initial_capital + total_pnl
-    except Exception:
+
+        # 扣除未平仓持仓占用的保证金
+        open_trades = session.query(Trade).filter(
+            Trade.closed_at.is_(None)
+        ).all()
+        used_margin = sum(
+            t.quantity * t.entry_price / settings.leverage_strategy_a
+            for t in open_trades
+            if t.quantity and t.entry_price
+        )
+
+        return settings.initial_capital + total_pnl - used_margin
+    except Exception as e:
+        log.error("balance_calc_failed", error=str(e))
         return settings.initial_capital
     finally:
         session.close()
@@ -204,5 +219,6 @@ def _get_price_precision(exchange: ccxt.binanceusdm, symbol: str) -> int:
             import math
             return int(round(-math.log10(raw)))
         return int(raw)
-    except Exception:
+    except Exception as e:
+        log.warning("price_precision_failed", symbol=symbol, error=str(e))
         return 2

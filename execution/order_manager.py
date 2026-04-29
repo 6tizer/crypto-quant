@@ -167,7 +167,12 @@ def place_market_long(
             )
         except Exception as e:
             log.error("stop_loss_order_failed", symbol=symbol, error=str(e))
-            # 止损单失败不阻止开仓，但需记录警告
+            # 止损单失败发 TG 告警
+            try:
+                from notifications.tg import notify_stop_loss
+                notify_stop_loss(symbol, size_result.risk_amount)
+            except Exception:
+                pass
 
         # ========== 9. 写入 trades 表 ==========
         trade = Trade(
@@ -376,9 +381,15 @@ def get_top_signals(limit: int = 3, session: DBSession | None = None) -> list[di
 
 
 def _get_price_precision(exchange: ccxt.binanceusdm, symbol: str) -> int:
-    """获取交易所价格精度。"""
+    """获取交易所价格精度（小数位数）。"""
     try:
         market = exchange.market(symbol)
-        return market.get("precision", {}).get("price", 2)
-    except Exception:
+        raw = market.get("precision", {}).get("price", 2)
+        # 如果是步长格式（如 1e-05），转换为小数位数
+        if isinstance(raw, float) and raw < 1:
+            import math
+            return int(round(-math.log10(raw)))
+        return int(raw)
+    except Exception as e:
+        log.warning("price_precision_failed", symbol=symbol, error=str(e))
         return 2

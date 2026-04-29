@@ -115,17 +115,21 @@ def run_trading_cycle() -> None:
         from data.db.models import Trade, get_session
         from sqlalchemy import func as sa_func
 
+        # 提前创建 exchange，复用给所有子函数
+        exchange = get_trading_exchange()
+        exchange.load_markets()
+
         session = get_session(settings.database_url)
         try:
             # 1. 风控检查
-            risk_ok, risk_reason = check_risk_status(session=session)
+            risk_ok, risk_reason = check_risk_status(exchange=exchange, session=session)
             if not risk_ok:
                 log.info("trading_blocked_by_risk", reason=risk_reason)
                 return
 
             # 2. 检查现有持仓止损/止盈
             try:
-                poll_positions(session=session)
+                poll_positions(exchange=exchange, session=session)
             except Exception as e:
                 log.error("poll_positions_error", error=str(e))
 
@@ -149,8 +153,6 @@ def run_trading_cycle() -> None:
             # 5. 逐个开仓
             from data.db.models import MarketSnapshot
             from sqlalchemy import desc as _desc
-            exchange = get_trading_exchange()
-            exchange.load_markets()
             for sig in signals:
                 try:
                     # 过滤非合约/已下线/股票代币
@@ -266,6 +268,17 @@ def main() -> None:
         minutes=60,
         id="push_system_status",
         name="推送系统状态",
+    )
+
+    # 日亏损归零 — 每天 UTC 00:00
+    from execution.risk_guard import reset_daily_loss
+    scheduler.add_job(
+        reset_daily_loss,
+        "cron",
+        hour=0,
+        minute=0,
+        id="reset_daily_loss",
+        name="日亏损归零",
     )
 
     # 启动时立即跑一次

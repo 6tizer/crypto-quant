@@ -261,11 +261,13 @@ def _get_equity(exchange: ccxt.binanceusdm | None = None) -> float:
     if exchange is None:
         try:
             exchange = get_trading_exchange()
-        except Exception:
+        except Exception as e:
+            log.warning("get_exchange_failed", error=str(e))
             return 0.0
     try:
         return get_account_balance(exchange)
-    except Exception:
+    except Exception as e:
+        log.warning("get_equity_failed", error=str(e))
         return 0.0
 
 
@@ -303,5 +305,6 @@ def _get_latest_fear_greed(session: DBSession) -> int | None:
             .first()
         )
         return row.value if row else None
-    except Exception:
+    except Exception as e:
+        log.warning("fear_greed_fetch_failed", error=str(e))
         return None
