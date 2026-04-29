@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     leverage_strategy_a: int = 5              # 策略 A 杠杆
     leverage_strategy_b: int = 3              # 策略 B 杠杆
     initial_capital: float = 100.0            # 初始资金 (u)
-    entry_threshold: float = 0.05             # 入场阈值（v5回测确认）
+    entry_threshold: float = 0.50             # 入场阈值（v5回测确认）
     max_positions: int = 5                    # 同时最大持仓数
     risk_per_trade: float = 0.02                # 单笔风险占 equity 的比例
 

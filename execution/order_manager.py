@@ -23,6 +23,7 @@ from execution.portfolio import (
     get_trading_exchange,
 )
 from execution.risk_guard import check_risk_status, record_stop_loss
+from utils.symbol import to_db_symbol, to_exchange_symbol
 
 log = structlog.get_logger()
 
@@ -62,6 +63,17 @@ def place_market_long(
 
     try:
         exchange.load_markets()
+
+        # ========== 1.5 合约市场验证 ==========
+        market = exchange.market(symbol) if symbol in exchange.markets else None
+        if not market:
+            ex_sym = to_exchange_symbol(symbol)
+            market = exchange.market(ex_sym) if ex_sym in exchange.markets else None
+        if not market:
+            raise ValueError(f"{symbol} 不在交易所市场列表中")
+        if not market.get("active", False):
+            raise ValueError(f"{symbol} 已下线或不可交易")
+        symbol = market["symbol"]  # 统一为交易所格式
 
         # ========== 2. 风控检查 ==========
         allowed, reason = check_risk_status(exchange, session)
@@ -159,7 +171,7 @@ def place_market_long(
 
         # ========== 9. 写入 trades 表 ==========
         trade = Trade(
-            symbol=_normalize_symbol(symbol),
+            symbol=to_db_symbol(symbol),
             side="LONG",
             entry_price=avg_price,
             stop_loss_price=size_result.stop_loss_price,
@@ -236,7 +248,7 @@ def handle_stop_loss_triggered(
             from sqlalchemy import desc as _desc
             trade = (
                 session.query(Trade)
-                .filter(Trade.symbol == _normalize_symbol(symbol), Trade.closed_at.is_(None))
+                .filter(Trade.symbol == to_db_symbol(symbol), Trade.closed_at.is_(None))
                 .order_by(_desc(Trade.opened_at))
                 .first()
             )
@@ -284,7 +296,7 @@ def handle_take_profit(
             from sqlalchemy import desc as _desc
             trade = (
                 session.query(Trade)
-                .filter(Trade.symbol == _normalize_symbol(symbol), Trade.closed_at.is_(None))
+                .filter(Trade.symbol == to_db_symbol(symbol), Trade.closed_at.is_(None))
                 .order_by(_desc(Trade.opened_at))
                 .first()
             )
@@ -361,11 +373,6 @@ def get_top_signals(limit: int = 3, session: DBSession | None = None) -> list[di
     finally:
         if own_session:
             session.close()
-
-
-def _normalize_symbol(symbol: str) -> str:
-    """统一交易对格式为 BASE/USDT（去掉 /USDT:USDT 后缀）"""
-    return symbol.replace("/USDT:USDT", "/USDT")
 
 
 def _get_price_precision(exchange: ccxt.binanceusdm, symbol: str) -> int:

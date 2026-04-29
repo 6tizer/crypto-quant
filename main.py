@@ -12,6 +12,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config.settings import settings
 from data.db.models import init_db
 
+from utils.symbol import to_exchange_symbol
+
+
 log = structlog.get_logger()
 
 
@@ -148,16 +151,16 @@ def run_trading_cycle() -> None:
             from sqlalchemy import desc as _desc
             exchange = get_trading_exchange()
             exchange.load_markets()
-            futures_symbols = set(exchange.markets.keys())
             for sig in signals:
                 try:
-                    # 过滤非合约币种（如股票代币 INTC）
+                    # 过滤非合约/已下线/股票代币
                     sym = sig["symbol"]
-                    if sym not in futures_symbols:
-                        # 尝试加 :USDT 后缀
-                        if f"{sym}:USDT" not in futures_symbols:
-                            log.info("skip_not_futures", symbol=sym)
-                            continue
+                    market = exchange.market(sym) if sym in exchange.markets else None
+                    if not market:
+                        market = exchange.market(to_exchange_symbol(sym)) if to_exchange_symbol(sym) in exchange.markets else None
+                    if not market or not market.get("active", False):
+                        log.info("skip_not_futures", symbol=sym, active=market.get("active") if market else None)
+                        continue
                     # 获取 ATR（用 volatility × price 作为近似）
                     snap = session.query(MarketSnapshot).filter(
                         MarketSnapshot.symbol == sym

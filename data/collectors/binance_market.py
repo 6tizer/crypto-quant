@@ -3,6 +3,8 @@
 import statistics
 from datetime import datetime, timedelta, timezone
 
+from utils.symbol import to_db_symbol
+
 import ccxt
 import structlog
 from sqlalchemy import desc
@@ -72,7 +74,7 @@ def fetch_and_store() -> int:
         two_days_ago = now - timedelta(hours=48)
         prev_oi_map: dict[str, float] = {}
         for sym in top_symbols:
-            base_sym = sym.replace("/USDT:USDT", "/USDT")
+            base_sym = to_db_symbol(sym)
             row = (
                 session.query(MarketSnapshot)
                 .filter(
@@ -109,7 +111,7 @@ def fetch_and_store() -> int:
         for sym, ticker, vol in top:
             change_pct = ticker.get("percentage", 0) or 0
             price = ticker.get("last", 0) or 0
-            base_sym = sym.replace("/USDT:USDT", "/USDT")
+            base_sym = to_db_symbol(sym)
 
             # 算 20 日波动率
             daily_returns = []
