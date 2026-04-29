@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     binance_api_key: str = ""
     binance_api_secret: str = ""
     binance_demo_trading: bool = True
+    notion_api_key: str = ""
+    telegram_bot_token: str = ""
     binance_proxy_host: str = "127.0.0.1"
     binance_proxy_port: int = 7897
 

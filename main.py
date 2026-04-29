@@ -1,4 +1,6 @@
 """Crypto Quant 主入口 — APScheduler 调度"""
+from dotenv import load_dotenv
+load_dotenv("config/.env")
 
 import signal
 import sys
