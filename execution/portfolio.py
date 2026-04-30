@@ -4,6 +4,7 @@ P1-⑤: ATR止损 + risk-based仓位（与回测v5一致）
 """
 
 from dataclasses import dataclass
+import math
 
 import ccxt
 import structlog
@@ -158,10 +159,24 @@ def calculate_position_size(
         min_qty_for_cost = effective_min / entry_price if entry_price > 0 else 0
         quantity = max(quantity, min_qty_for_cost, min_amount or 0)
         quantity = _round_to_precision(quantity, qty_precision)
-        # 舍入后如果金额不够，向上补一步
-        step = 10 ** (-qty_precision) if qty_precision > 0 else 1.0
+        # 舍入后如果金额不够，向上补一步。ccxt 在 TICK_SIZE 模式下 precision.amount 是步长（如 0.01），不是小数位数。
+        step = _precision_to_step(qty_precision)
+        max_iterations = 1000
+        iterations = 0
         while quantity * entry_price < effective_min / 1.10 and quantity < 1e12:
             quantity = _round_to_precision(quantity + step, qty_precision)
+            iterations += 1
+            if iterations >= max_iterations:
+                log.error(
+                    "quantity_rounding_loop_guard_triggered",
+                    symbol=symbol,
+                    quantity=quantity,
+                    step=step,
+                    qty_precision=qty_precision,
+                    entry_price=entry_price,
+                    effective_min=effective_min,
+                )
+                return None
         if quantity < (min_amount or 0):
             log.warning("quantity_below_min", symbol=symbol, quantity=quantity, min=min_amount)
             return None
@@ -205,10 +220,33 @@ def can_open_new_position(exchange: ccxt.binanceusdm, max_positions: int = 5) ->
     return True
 
 
-def _round_to_precision(value: float, precision) -> float:
-    precision = int(precision)
-    factor = 10 ** precision
-    return int(value * factor) / factor
+def _precision_to_step(precision: int | float | None) -> float:
+    """把 ccxt amount precision 转成数量步长。
+
+    Binance/ccxt 当前是 TICK_SIZE 模式：precision.amount 可能是 0.01、1.0。
+    旧代码把 0.01 当成“小数位数”转 int，导致 quantity 永远 round 成 0 并死循环。
+    """
+    if precision is None:
+        return 1e-8
+    raw = float(precision)
+    if raw <= 0:
+        return 1.0
+    if raw < 1:
+        return raw
+    # 在 TICK_SIZE 模式下 1.0 表示整数步长；兼容旧式 precision=2 表示两位小数。
+    if raw == 1.0:
+        return 1.0
+    return 10 ** (-int(raw))
+
+
+def _round_to_precision(value: float, precision: int | float | None) -> float:
+    step = _precision_to_step(precision)
+    if step <= 0:
+        return value
+    rounded = math.floor(value / step) * step
+    # 避免 1.2300000000000002 这类浮点噪音
+    decimals = max(0, int(round(-math.log10(step)))) if step < 1 else 0
+    return round(rounded, decimals)
 
 
 def _get_price_precision(exchange: ccxt.binanceusdm, symbol: str) -> int:

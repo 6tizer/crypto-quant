@@ -116,22 +116,29 @@ def run_trading_cycle() -> None:
         from sqlalchemy import func as sa_func
 
         # 提前创建 exchange，复用给所有子函数
+        log.info("trading_cycle_creating_exchange")
         exchange = get_trading_exchange()
+        log.info("trading_cycle_loading_markets")
         exchange.load_markets()
+        log.info("trading_cycle_exchange_ready")
 
         session = get_session(settings.database_url)
         try:
             # 1. 风控检查
+            log.info("trading_cycle_checking_risk")
             risk_ok, risk_reason = check_risk_status(exchange=exchange, session=session)
             if not risk_ok:
                 log.info("trading_blocked_by_risk", reason=risk_reason)
                 return
+            log.info("trading_cycle_risk_ok")
 
             # 2. 检查现有持仓止损/止盈
+            log.info("trading_cycle_polling_positions")
             try:
                 poll_positions(exchange=exchange, session=session)
             except Exception as e:
                 log.error("poll_positions_error", error=str(e))
+            log.info("trading_cycle_poll_done")
 
             # 3. 检查当前持仓数量
             open_count = session.query(sa_func.count(Trade.id)).filter(
