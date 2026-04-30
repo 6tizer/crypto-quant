@@ -101,12 +101,23 @@ def _check_positions(session) -> dict:
 
 def _check_process_alive() -> dict:
     """main.py 进程是否在运行"""
+    import os
     import subprocess
 
-    result = subprocess.run(["pgrep", "-f", "main.py"], capture_output=True, text=True)
+    # 优先用 launchd 检查（可靠）
+    result = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/com.crypto-quant.main"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 0 and "running" in result.stdout.lower():
+        return {"ok": True, "name": "进程", "detail": "运行中 (launchd)"}
+
+    # fallback: pgrep
+    result = subprocess.run(["pgrep", "-f", "main.py"], capture_output=True, text=True, timeout=5)
     if result.returncode == 0:
         pids = result.stdout.strip().split("\n")
         return {"ok": True, "name": "进程", "detail": f"运行中 (PID: {', '.join(pids)})"}
+
     return {"ok": False, "name": "进程", "detail": "main.py 未运行"}
 
 
