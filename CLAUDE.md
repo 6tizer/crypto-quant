@@ -160,15 +160,21 @@ crypto-quant/
 - P2-3: 止盈阶梯/交易间隔/max_positions 魔法数字提取到 settings
 - P2-4: handle_take_profit 已合并到 P1-4B 修复
 
+**Round 3 — commit `9aee43a`（生产阻塞 Bug）：**
+- 修复 `calculate_position_size()` 数量精度死循环导致 `main.py` CPU 100%
+- 根因：ccxt/binance `precision.amount` 在 TICK_SIZE 模式下返回步长（如 `0.01`），旧 `_round_to_precision` 错当小数位数 `int(0.01)=0`，导致 min_notional 补量循环里 quantity 永远为 0
+- 修复：新增 `_precision_to_step()`，按步长 floor，并给补量 while 加 1000 次 guard
+
 ## 已知坑
 - `utils/symbol.py` 处理币安合约标的格式差异，新增标的注意测试
 - ccxt 的 `create_order` 需要 `exchange.load_markets()` 先加载市场信息
+- ccxt/binance `precision.amount` 可能是步长（TICK_SIZE，如 `0.01` / `1.0`），不是小数位数；数量舍入必须用 step 逻辑，不要 `int(precision)`
 - 数据库文件在 `data/crypto_quant.db`，相对路径，必须在项目根目录运行
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **crypto-quant** (868 symbols, 1448 relationships, 53 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **crypto-quant** (874 symbols, 1459 relationships, 54 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
