@@ -3,6 +3,10 @@
 import os
 from datetime import datetime, timedelta
 
+# Notion API 直连不走代理（避免代理 SSL 不稳定）
+os.environ["no_proxy"] = os.environ.get("no_proxy", "") + ",api.notion.com"
+os.environ["NO_PROXY"] = os.environ.get("NO_PROXY", "") + ",api.notion.com"
+
 import requests
 import structlog
 
@@ -36,11 +40,17 @@ DB_DAILY_MARKET = "dada5583-e22e-42f9-82ae-2a65087d89fa"
 DB_SYSTEM_STATUS = "4b9ed067-f135-4298-9302-44f77dc022af"
 
 
-def _notion_post(url: str, payload: dict) -> dict:
-    resp = requests.post(url, headers=HEADERS, json=payload, timeout=30)
-    if resp.status_code >= 400:
-        log.error("notion_api_error", status=resp.status_code, body=resp.text[:200])
-    return resp.json()
+def _notion_post(url: str, payload: dict, retries: int = 3) -> dict:
+    for attempt in range(retries):
+        try:
+            resp = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+            if resp.status_code >= 400:
+                log.error("notion_api_error", status=resp.status_code, body=resp.text[:200])
+            return resp.json()
+        except requests.exceptions.Timeout:
+            log.warning("notion_api_timeout", attempt=attempt + 1, url=url[-40:])
+            if attempt == retries - 1:
+                raise
 
 
 def _archive_old_rows(ds_id: str, keep: int = 0):
@@ -58,7 +68,7 @@ def _archive_old_rows(ds_id: str, keep: int = 0):
             f"https://api.notion.com/v1/pages/{row['id']}",
             headers=HEADERS,
             json={"in_trash": True},
-            timeout=10,
+            timeout=30,
         )
     if to_delete:
         log.info("notion_rows_archived", ds=ds_id[:8], count=len(to_delete))

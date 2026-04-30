@@ -74,7 +74,7 @@ def check_risk_pause(session) -> dict:
     state = session.query(RiskState).order_by(RiskState.id.desc()).first()
     if state is None:
         return {"name": "风控暂停", "passed": False, "detail": "无风控状态记录"}
-    has_pause = state.is_paused or state.consecutive_stops >= 3
+    has_pause = state.is_paused or state.consecutive_stops >= settings.max_consecutive_stops
     reason_parts = []
     if state.consecutive_stops > 0:
         reason_parts.append(f"连续止损={state.consecutive_stops}")

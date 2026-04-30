@@ -138,11 +138,20 @@ def run_health_check(send_alert: bool = True) -> list[dict]:
         if send_alert:
             _send_alert(failed)
 
-    # 更新 Notion 系统状态看板
+    # 更新 Notion 系统状态看板（加超时保护，避免卡住调度器）
     try:
         from data.push.notion_dashboard import push_system_status
 
-        push_system_status()
+        import threading
+
+        def _push():
+            push_system_status()
+
+        t = threading.Thread(target=_push, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        if t.is_alive():
+            log.warning("dashboard_push_timeout")
     except Exception as e:
         log.warning("dashboard_push_failed", error=str(e))
 
