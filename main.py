@@ -159,6 +159,18 @@ def run_trading_cycle() -> None:
             slots = settings.max_positions - open_count
             signals = get_top_signals(limit=slots, session=session)
 
+            # 过滤黑名单标的（按 symbol base 匹配）
+            blacklist = settings.blacklist_symbol_set
+            if blacklist:
+                before = len(signals)
+                signals = [
+                    s for s in signals
+                    if s["symbol"].split("/")[0] not in blacklist
+                ]
+                filtered = before - len(signals)
+                if filtered:
+                    log.info("blacklist_filtered", count=filtered, blacklist=list(blacklist))
+
             if not signals:
                 log.info("no_signals_above_threshold")
                 return

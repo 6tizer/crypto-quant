@@ -26,6 +26,12 @@ class Settings(BaseSettings):
 
     # 标的范围
     top_symbols_count: int = 50
+    blacklist_symbols: str = "INTC"  # 逗号分隔的黑名单标的
+
+    @property
+    def blacklist_symbol_set(self) -> set[str]:
+        """解析逗号分隔的黑名单为 set，用于快速匹配。"""
+        return {s.strip() for s in self.blacklist_symbols.split(",") if s.strip()}
 
     # === 交易参数（阶段 3 使用，提前定义） ===
     stop_loss_amount: float = 200.0           # 固定止损金额 (u) — 大资金后期用
