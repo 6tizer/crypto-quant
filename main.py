@@ -317,6 +317,16 @@ def main() -> None:
         name="日亏损归零",
     )
 
+    # 健康检查 — 每 30 分钟
+    from scripts.health_check import run_health_check
+    scheduler.add_job(
+        run_health_check,
+        "interval",
+        minutes=30,
+        id="health_check",
+        name="健康检查",
+    )
+
     # 启动时立即跑一次
     log.info("running_initial_collection")
     run_market_collector()
