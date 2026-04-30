@@ -18,11 +18,29 @@
 - structlog（JSON 日志，统一用 `structlog.get_logger()`）
 - pydantic-settings（`config/settings.py`，从 `config/.env` 读取）
 
+## 架构定位
+**本项目独立运行，不依赖 Hermes 进程树。** Hermes 是核心贡献者/协作者角色，不是宿主。
+服务通过 macOS launchd 运行（`~/Library/LaunchAgents/com.crypto-quant.main.plist`），
+具有 KeepAlive（崩溃自重启）和 RunAtLoad（开机自启）特性。
+
+```bash
+# 服务管理
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.crypto-quant.main.plist   # 启动
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.crypto-quant.main.plist     # 停止
+# 重启 = 先 bootout 再 bootstrap
+
+# 日志
+tail -f /tmp/crypto-quant-stdout.log   # 正常日志
+tail -f /tmp/crypto-quant-stderr.log   # 错误日志
+```
+
 ## 运行方式
 ```bash
 uv sync                              # 安装依赖
-PYTHONPATH=. uv run python scripts/verify.py   # 验证所有采集器
-PYTHONPATH=. uv run python main.py             # 启动调度服务（常驻）
+PYTHONPATH=. uv run python scripts/verify_stage3.py   # 阶段3验证
+PYTHONPATH=. uv run python scripts/verify.py           # 验证所有采集器
+PYTHONPATH=. uv run python scripts/health_check.py     # 手动健康检查
+PYTHONPATH=. uv run python scripts/push_dashboards.py  # 手动推送 Notion 看板
 PYTHONPATH=. uv run python -m backtest.simple_backtest  # 回测
 ```
 
