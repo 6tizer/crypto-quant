@@ -148,35 +148,43 @@ def place_market_long(
         # ========== 8. 下止损限价单 ==========
         stop_order = None
         stop_order_id = None
-        try:
-            # STOP_LOSS_LIMIT: 触发价到达后以限价卖出
-            stop_limit_price = round(size_result.stop_loss_price * 0.99, _get_price_precision(exchange, symbol))
-            stop_order = exchange.create_order(
-                symbol,
-                type="STOP_LOSS_LIMIT",
-                side="sell",
-                amount=filled_qty,
-                price=stop_limit_price,
-                params={
-                    "stopPrice": size_result.stop_loss_price,
-                    "reduceOnly": True,
-                },
-            )
-            stop_order_id = str(stop_order.get("id", ""))
-            log.info(
-                "stop_loss_order_placed",
-                symbol=symbol,
-                stop_price=size_result.stop_loss_price,
-                stop_order_id=stop_order_id,
-            )
-        except Exception as e:
-            log.error("stop_loss_order_failed", symbol=symbol, error=str(e))
-            # 止损单失败发 TG 告警
+        if settings.demo_trading:
+            # Demo Trading 不支持任何条件单，止损靠 poll_positions 轮询
+            log.info("stop_loss_skipped_demo", symbol=symbol, reason="demo_mode_uses_polling")
+        else:
             try:
-                from notifications.tg import notify_stop_loss
-                notify_stop_loss(symbol, size_result.risk_amount)
-            except Exception:
-                pass
+                # STOP_LOSS_LIMIT: 触发价到达后以限价卖出
+                stop_limit_price = round(size_result.stop_loss_price * 0.99, _get_price_precision(exchange, symbol))
+                stop_order = exchange.create_order(
+                    symbol,
+                    type="STOP_LOSS_LIMIT",
+                    side="sell",
+                    amount=filled_qty,
+                    price=stop_limit_price,
+                    params={
+                        "stopPrice": size_result.stop_loss_price,
+                        "reduceOnly": True,
+                    },
+                )
+                stop_order_id = str(stop_order.get("id", ""))
+                log.info(
+                    "stop_loss_order_placed",
+                    symbol=symbol,
+                    stop_price=size_result.stop_loss_price,
+                    stop_order_id=stop_order_id,
+                )
+            except Exception as e:
+                log.error("stop_loss_order_failed", symbol=symbol, error=str(e))
+                # 止损单下失败发 TG 告警（不是止损触发，是止损保护缺失）
+                try:
+                    from notifications.tg import send_notification
+                    send_notification(
+                        f"⚠️ 止损单下失败 {symbol}\n"
+                        f"错误: {str(e)[:100]}\n"
+                        f"持仓已裸露，止损靠 poll_positions 轮询兜底"
+                    )
+                except Exception:
+                    pass
 
         # ========== 9. 写入 trades 表 ==========
         trade = Trade(
