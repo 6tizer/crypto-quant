@@ -91,7 +91,7 @@ def check_risk_pause(session) -> dict:
 
 def check_tg_notifications() -> dict:
     """5. Telegram 通知 — 检查日志中 TG 发送记录"""
-    log_path = Path("/tmp/crypto-quant.log")
+    log_path = Path("/tmp/crypto-quant-stdout.log")
     if not log_path.exists():
         return {"name": "Telegram 通知", "passed": False, "detail": "日志文件不存在"}
 
@@ -109,7 +109,7 @@ def check_tg_notifications() -> dict:
 
 def check_watchdog() -> dict:
     """6. Watchdog — 检查 watchdog 是否在运行"""
-    log_path = Path("/tmp/crypto-quant.log")
+    log_path = Path("/tmp/crypto-quant-stdout.log")
     if not log_path.exists():
         return {"name": "Watchdog", "passed": False, "detail": "日志文件不存在"}
 
@@ -141,7 +141,7 @@ def check_watchdog() -> dict:
 
 def check_dashboard_push(session) -> dict:
     """7. 数据看板推送 — 检查 Notion 推送记录"""
-    log_path = Path("/tmp/crypto-quant.log")
+    log_path = Path("/tmp/crypto-quant-stdout.log")
     if not log_path.exists():
         return {"name": "数据看板推送", "passed": False, "detail": "日志文件不存在"}
 

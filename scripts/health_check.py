@@ -18,7 +18,7 @@ from data.db.models import MarketSnapshot, RiskState, Trade, get_session
 
 log = structlog.get_logger()
 
-LOG_PATH = Path("/tmp/crypto-quant.log")
+LOG_PATH = Path("/tmp/crypto-quant-stdout.log")
 
 # 健康检查阈值
 STALE_DATA_SECONDS = 600  # 10 分钟无新数据 = 异常
@@ -168,7 +168,7 @@ def _send_alert(failed_checks: list[dict]) -> None:
         f"⚠️ 系统健康检查异常\n"
         f"时间: {now}\n"
         f"异常项:\n{details}\n\n"
-        f"建议: 检查 /tmp/crypto-quant.log"
+        f"建议: 检查 /tmp/crypto-quant-stdout.log"
     )
     send_notification(msg)
 
