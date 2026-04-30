@@ -4,6 +4,7 @@ load_dotenv("config/.env")
 
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 
 import structlog
@@ -106,6 +107,7 @@ def run_push_system_status() -> None:
 
 def run_trading_cycle() -> None:
     """交易循环：检查信号 → 开仓 → 检查持仓止损/止盈。"""
+    started = time.monotonic()
     log.info("trading_cycle_start")
     try:
         from execution.order_manager import place_market_long, get_top_signals
@@ -147,6 +149,10 @@ def run_trading_cycle() -> None:
 
             if open_count >= settings.max_positions:
                 log.info("max_positions_reached", count=open_count)
+                return
+
+            if not settings.trading_enabled:
+                log.info("trading_disabled_skip_new_entries")
                 return
 
             # 4. 获取 Top 信号
@@ -193,7 +199,15 @@ def run_trading_cycle() -> None:
 
     except Exception as e:
         log.error("trading_cycle_error", error=str(e))
-    log.info("trading_cycle_done")
+    finally:
+        elapsed = time.monotonic() - started
+        if settings.watchdog_enabled and elapsed > settings.trading_cycle_timeout_seconds:
+            log.error(
+                "trading_cycle_slow",
+                elapsed=round(elapsed, 2),
+                timeout=settings.trading_cycle_timeout_seconds,
+            )
+        log.info("trading_cycle_done", elapsed=round(elapsed, 2))
 
 
 def main() -> None:
@@ -252,6 +266,9 @@ def main() -> None:
         seconds=settings.trading_cycle_interval,
         id="trading_cycle",
         name="交易循环",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
     )
 
     # Notion 看板推送

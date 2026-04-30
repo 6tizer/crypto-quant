@@ -16,9 +16,9 @@ class TestMomentumAnomaly:
         assert score == 1.0
 
     def test_weak_trigger(self):
-        """涨幅 > 0.6 * N * volatility → 0.5"""
-        # change=4%, vol=2% → 0.04, threshold=0.05, 0.6*0.05=0.03 → 0.04 > 0.03
-        score = detect_momentum_anomaly("BTC/USDT", price_change_pct=4.0, volatility_20d=0.02)
+        """涨幅 > 0.6 * N * volatility 且 < N * volatility → 0.5"""
+        # 当前 N=1.5: change=2%, vol=2% → threshold=3%, weak_threshold=1.8% → 0.5
+        score = detect_momentum_anomaly("BTC/USDT", price_change_pct=2.0, volatility_20d=0.02)
         assert score == 0.5
 
     def test_no_trigger(self):

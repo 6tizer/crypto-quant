@@ -52,6 +52,10 @@ def place_market_long(
         ValueError: 参数校验失败
         RuntimeError: 风控检查未通过
     """
+    if not settings.trading_enabled:
+        log.warning("place_order_blocked_trading_disabled", symbol=symbol)
+        return None
+
     # ========== 1. 前置准备 ==========
     own_session = False
     if session is None:

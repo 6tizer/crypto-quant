@@ -69,11 +69,12 @@ crypto-quant/
 3. **只做多不做空**：`order_manager.py` 只实现市价开多
 4. **止损动态计算**：早期（净值 < 1000u）用百分比（20%），后期切固定金额（200u）
 5. **止盈阶梯**：1.5x 平半 + 保本 → 3x 平 75% → 5x 清仓 → 48h 强制平仓；1.5x 后启动 trailing stop（峰值回撤 40%）
-6. **风控四条线**：连续止损 3 次暂停 / 日亏上限 / 总回撤 30% 暂停 / 恐贪 < 15 暂停
-7. **日志统一**：全部用 `structlog.get_logger()`，输出 JSON 格式，不要用 print 或标准 logging
-8. **配置单一入口**：所有参数在 `config/settings.py` 定义，密钥走 `.env`，代码里不要硬编码
-9. **代码规范**：类型标注 + docstring，SQLAlchemy 查询注意 session 关闭（try/finally）
-10. **阶段 1-3 用 testnet**：`binance_demo_trading: true`，不需要真实 API Key
+6. **安全开关**：`trading_enabled=False` 时只做持仓监控，不开新仓；`watchdog_enabled=True` 时记录慢交易循环
+7. **风控四条线**：连续止损 3 次暂停 / 日亏上限 / 总回撤 30% 暂停 / 恐贪 < 15 暂停
+8. **日志统一**：全部用 `structlog.get_logger()`，输出 JSON 格式，不要用 print 或标准 logging
+9. **配置单一入口**：所有参数在 `config/settings.py` 定义，密钥走 `.env`，代码里不要硬编码
+10. **代码规范**：类型标注 + docstring，SQLAlchemy 查询注意 session 关闭（try/finally）
+11. **阶段 1-3 用 testnet**：`binance_demo_trading: true`，不需要真实 API Key
 
 ## Notion HUB
 - 项目文档中心在 Notion（Crypto Quant HUB），含留言板数据库、Agent 接入指南

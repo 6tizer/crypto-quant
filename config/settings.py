@@ -47,8 +47,11 @@ class Settings(BaseSettings):
     force_close_hours: int = 48               # 持仓超时强制平仓 (h)
     trailing_drawdown: float = 0.4            # 峰值回撤触发 trailing stop (40%)
 
-    # === 调度间隔 ===
+    # === 调度与安全开关 ===
+    trading_enabled: bool = False             # 交易总开关：False 时只监控持仓，不开新仓
+    watchdog_enabled: bool = True             # 轻量 watchdog：记录慢交易循环
     trading_cycle_interval: int = 300         # 交易循环间隔 (s)
+    trading_cycle_timeout_seconds: int = 120  # 单次交易循环超时阈值 (s)
 
     # === 风控参数 ===
     max_consecutive_stops: int = 3            # 连续止损暂停阈值
